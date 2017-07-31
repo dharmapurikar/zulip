@@ -1,118 +1,225 @@
 {% extends "zerver/portico_signup.html" %}
-
-{% comment %}
+{#
 Gather other user information, after having confirmed
 their email address.
 
 Form is validated both client-side using jquery-validate (see signup.js) and server-side.
-{% endcomment %}
+#}
 
 {% block customhead %}
-{{ block.super }}
-<script type="text/javascript" src="/static/third/zxcvbn/zxcvbn.js"></script>
+{{ super() }}
+{{ render_bundle('zxcvbn') }}
+{{ render_bundle('translations') }}
 {% endblock %}
 
-{% block for_you %}for {% if company_name %} {{company_name}} {% else %} __________ {% endif %} {% endblock %}
 {% block portico_content %}
+<div class="register-account flex full-page">
+    <div class="center-block new-style" style="padding: 20px 0px">
 
-<div class="pitch">
+        <div class="pitch">
+            {% trans %}
+            <h1>You're almost there.</h1>
+            <p>We just need you to do one last thing.</p>
+            {% endtrans %}
+        </div>
 
-    <p style="margin-top:30px;">You're almost there. We just need you to do one last thing.</p>
-    <h3>Tell us a bit about yourself.</h3>
-</div>
+        <form method="post" class="form-horizontal white-box" id="registration" action="{{ url('zerver.views.registration.accounts_register') }}">
+            {{ csrf_input }}
 
-<form method="post" class="form-horizontal" id="registration" action="{% url 'zerver.views.accounts_register' %}">
-{% csrf_token %}
-    <div class="control-group">
-        <label for="id_email" class="control-label">Email</label>
-        <div class="controls fakecontrol">
-            <input type='hidden' name='key' value='{{ key }}' />
-            <p>{{ email }}</p>
-        </div>
-    </div>
-    <div class="control-group">
-        <label for="id_full_name" class="control-label">Full name</label>
-        <div class="controls">
-            {% if lock_name %}
-                <p class="fakecontrol">{{ full_name }}</p>
-            {% else %}
-                <input id="id_full_name" class="required" type="text" name="full_name"
-                value="{% if full_name %}{{ full_name }}{% elif form.full_name.value %}{{ form.full_name.value }}{% endif %}"
-                       maxlength="100" />
-                {% if form.full_name.errors %}
-                    {% for error in form.full_name.errors %}
-                        <div class="alert alert-error">{{ error }}</div>
-                    {% endfor %}
-                {% endif %}
-            {% endif %}
-        </div>
-    </div>
-    {% if password_auth_enabled %}
-        <div class="control-group">
-            <label for="id_password" class="control-label">Password</label>
-            <div class="controls">
-                <input id="id_password" class="required" type="password" name="password"
-                       value="{% if form.password.value %}{{ form.password.value }}{% endif %}"
-                       maxlength="100" />
-                {% if full_name %}
-                <span class="help-inline">This is used for mobile applications and other tools that require a password.</span>
-                {% endif %}
-                {% if form.password.errors %}
-                    {% for error in form.password.errors %}
-                        <div class="alert alert-error">{{ error }}</div>
-                    {% endfor %}
-                {% endif %}
-            </div>
-        </div>
-        <div class="control-group">
-            <label class="control-label">Password strength</label>
-            <div class="controls">
-                <div class="progress" id="pw_strength">
-                    <div class="bar bar-danger" style="width: 10%;"></div>
+            <section class="user-registration">
+                <div class="input-box no-validation">
+                    <input type='hidden' name='key' value='{{ key }}' />
+                    <input type='hidden' name='timezone' id='timezone'/>
+                    <input id="id_email" type='text' disabled="true" placeholder="{{ email }}" required />
+                    <label for="id_email" class="inline-block label-title">{{ _('Email') }}</label>
                 </div>
-            </div>
-        </div>
 
-    {% endif %}
+                <div class="input-box">
+                    {% if lock_name %}
+                        <p class="fakecontrol">{{ full_name }}</p>
+                    {% else %}
+                        <input id="id_full_name" class="required" type="text" name="full_name"
+                        value="{% if full_name %}{{ full_name }}{% elif form.full_name.value() %}{{ form.full_name.value() }}{% endif %}"
+                        maxlength={{ MAX_NAME_LENGTH }} placeholder="{% trans %}Full name or 名前{% endtrans %}" required />
+                        <label for="id_full_name" class="inline-block label-title">{{ _('Full name') }}</label>
+                        {% if form.full_name.errors %}
+                            {% for error in form.full_name.errors %}
+                            <p class="help-inline text-error">{{ error }}</p>
+                            {% endfor %}
+                        {% endif %}
+                    {% endif %}
+                </div>
 
-    {% if not_voyager %}
-        <div class="control-group">
-            <div class="controls">
-                <label class="checkbox">
-                    {% comment %}
+                {% if password_auth_enabled %}
+                <div class="input-box">
+                    <input id="id_password" class="required" type="password" name="password"
+                           value="{% if form.password.value() %}{{ form.password.value() }}{% endif %}"
+                           maxlength={{ MAX_PASSWORD_LENGTH }}
+                           data-min-length="{{password_min_length}}"
+                           data-min-quality="{{password_min_quality}}" required />
+                    <label for="id_password" class="inline-block">{{ _('Password') }}</label>
+                    {% if full_name %}
+                    <span class="help-inline">
+                        {{ _('This is used for mobile applications and other tools that require a password.') }}
+                    </span>
+                    {% endif %}
+                    {% if form.password.errors %}
+                        {% for error in form.password.errors %}
+                        <p class="help-inline text-error">{{ error }}</p>
+                        {% endfor %}
+                    {% endif %}
+                    <div class="progress" id="pw_strength" title="{{ _('Password strength') }}">
+                        <div class="bar bar-danger" style="width: 10%;"></div>
+                    </div>
+                </div>
+                {% endif %}
+            </section>
+
+            <section class="org-registration">
+                {% if creating_new_team %}
+                <div class="input-box">
+                    <div class="inline-block relative">
+                        <input id="id_team_name" class="required" type="text"
+                            placeholder="Acme or Aκμή"
+                            value="{% if form.realm_name.value() %}{{ form.realm_name.value() }}{% endif %}"
+                            name="realm_name" maxlength={{ MAX_REALM_NAME_LENGTH }} required />
+                    </div>
+                    <label for="id_team_name" class="inline-block label-title">{{ _('Organization name') }}</label>
+                    {% if form.realm_name.errors %}
+                        {% for error in form.realm_name.errors %}
+                        <p class="help-inline text-error">{{ error }}</p>
+                        {% endfor %}
+                    {% endif %}
+
+                    <div class="help-box margin-top">
+                        {{ _('Shorter is better than longer.') }}
+                    </div>
+                </div>
+
+                <div class="input-box">
+                    <label for="id_team_subdomain" class="inline-block label-title">
+                        {% if realms_have_subdomains %}
+                        {{ _('Subdomain') }}
+                        {% else %}
+                        {{ _('Organization handle') }}
+                        {% endif %}
+                    </label>
+                    <div class="breakpoint">
+                        <div class="inline-block relative">
+                            <input id="id_team_subdomain" class="required {% if realms_have_subdomains %}subdomain{% endif %}" type="text"
+                                placeholder="acme"
+                                value="{% if form.realm_subdomain.value() %}{{ form.realm_subdomain.value() }}{% endif %}"
+                                name="realm_subdomain" maxlength={{ MAX_REALM_SUBDOMAIN_LENGTH }} required />
+                            {% if realms_have_subdomains %}
+                            <p class="realm_subdomain_label">.{{ external_host }}</p>
+                            {% endif %}
+                            <p id="id_team_subdomain_error_client" class="error help-inline text-error"></p>
+                        </div>
+                        {% if form.realm_subdomain.errors %}
+                            {% for error in form.realm_subdomain.errors %}
+                            <p class="error help-inline text-error team_subdomain_error_server">{{ error }}</p>
+                            {% endfor %}
+                        {% endif %}
+                    </div>
+                    <div class="help-box margin-top">
+                        {% if realms_have_subdomains %}
+                        {{ _("The address you'll use to sign in to your organization.") }}
+                        {% else %}
+                        {{ _("a-z, 0-9, and - only.") }}
+                        {% endif %}
+                    </div>
+                </div>
+                {% endif %}
+            </section>
+
+            <div class="input-group margin terms-of-service">
+                {% if terms_of_service %}
+                <div class="input-group">
+                    {#
                     This is somewhat subtle.
                     Checkboxes have a name and value, and when the checkbox is ticked, the form posts
                     with name=value. If the checkbox is unticked, the field just isn't present at all.
 
                     This is distinct from 'checked', which determines whether the checkbox appears
                     at all. (So, it's not symmetric to the code above.)
-                    {% endcomment %}
+                    #}
                     <input id="id_terms" class="required" type="checkbox" name="terms"
-                           {% if form.terms.value %}checked="checked"{% endif %} />
-                    I agree to the <a href="/terms" target="_blank">Terms of Service</a>.
-                </label>
-                {% if form.terms.errors %}
-                    {% for error in form.terms.errors %}
-                        <div class="alert alert-error">{{ error }}</div>
-                    {% endfor %}
+                           {% if form.terms.value() %}checked="checked"{% endif %} />
+                    <label for="id_terms" class="inline-block">
+                        {% trans %}I agree to the <a href="{{ server_uri }}/terms" target="_blank">Terms of Service</a>.{% endtrans %}
+                    </label>
+                    {% if form.terms.errors %}
+                        {% for error in form.terms.errors %}
+                        <div class="help-inline text-error">{{ error }}</div>
+                        {% endfor %}
+                    {% endif %}
+                </div>
                 {% endif %}
+                <div class="register-button-box">
+                    <button class="register-button" type="submit">{{ _('Register') }}</button>
+                    <input type="hidden" name="next" value="{{ next }}" />
+                </div>
             </div>
-        </div>
-    {% endif %}
-    <div class="control-group">
-        <div class="controls">
-            <input type="submit" class="btn btn-large btn-primary" value="Register" /><br />
-            <input type="hidden" name="next" value="{{ next }}" />
-        </div>
+        </form>
+
     </div>
-</form>
+</div>
 
 <script type="text/javascript">
-if ($('#id_email:visible').length) {
-    autofocus('#id_email');
-} else if ($('#id_full_name:visible').length) {
-    autofocus('#id_full_name');
+if ($('#id_email').length === 1) {
+    if (!$('#id_email').attr('disabled')) {
+        common.autofocus('#id_email');
+    } else {
+        common.autofocus('#id_full_name');
+    }
+} else {
+    common.autofocus('#id_full_name');
 }
+
+// if realms have subdomains, set the subdomain input width
+$('#id_team_subdomain').css({
+    width: 300 - $('.realm_subdomain_label').width(),
+    'margin-right': $('.realm_subdomain_label').width() + 4,
+});
+
+// reset error message displays
+$('#id_team_subdomain_error_client').css('display', 'none');
+if ($('.team_subdomain_error_server').text() === '') {
+    $('.team_subdomain_error_server').css('display', 'none');
+}
+
+$("#timezone").val(moment.tz.guess());
+
+$('#id_team_subdomain').on('input', function (e) {
+    // preserve selection range, to be set after setting the text
+    var start = e.target.selectionStart,
+        end = e.target.selectionEnd;
+
+    // toggle displaying server-side / client-side errors; messages
+    // from only one of the two should be showing at any time.
+    $('.team_subdomain_error_server').text('').css('display', 'none');
+
+    var autocorrected = e.target.value
+        .toLowerCase()
+        .replace(/[_|\s]/g, '-');
+
+    e.target.value = autocorrected;
+
+    if (e.target.value.charAt(0) === '-' ||
+        e.target.value.charAt(e.target.value.length - 1) === '-') {
+        $('#id_team_subdomain_error_client')
+            .text(i18n.t("Cannot start or end with a '-'"))
+            .css('display', 'block');
+    } else if (/[^0-9a-z\-]/.test(e.target.value)) {
+        $('#id_team_subdomain_error_client')
+            .text(i18n.t("Can only use letters a-z, numbers 0-9, and '-'s."))
+            .css('display', 'block');
+    } else {
+        $('#id_team_subdomain_error_client').text('').css('display', 'none');
+    }
+
+    e.target.setSelectionRange(start, end);
+});
 </script>
 
 {% endblock %}

@@ -1,18 +1,39 @@
-from django.test import TestCase
+from __future__ import absolute_import
+from __future__ import print_function
+from contextlib import contextmanager
+from typing import (cast, Any, Callable, Dict, Generator, Iterable, Iterator, List, Mapping,
+                    Optional, Set, Sized, Tuple, Union, IO, Text)
 
+from django.core import signing
+from django.core.urlresolvers import LocaleRegexURLResolver
+from django.conf import settings
+from django.test import TestCase
+from django.test.client import (
+    BOUNDARY, MULTIPART_CONTENT, encode_multipart,
+)
+from django.template import loader
+from django.http import HttpResponse
+from django.db.utils import IntegrityError
+
+from zerver.lib.avatar import avatar_url
+from zerver.lib.cache import get_cache_backend
 from zerver.lib.initial_password import initial_password
 from zerver.lib.db import TimeTrackingCursor
+from zerver.lib.str_utils import force_text
 from zerver.lib import cache
-from zerver.lib import event_queue
+from zerver.tornado import event_queue
+from zerver.tornado.handlers import allocate_handler_id
 from zerver.worker import queue_processors
 
 from zerver.lib.actions import (
-    check_send_message, create_stream_if_needed, do_add_subscription,
-    get_display_recipient, get_user_profile_by_email,
+    check_send_message, create_stream_if_needed, bulk_add_subscriptions,
+    get_display_recipient, bulk_remove_subscriptions
 )
 
 from zerver.models import (
-    resolve_email_to_domain,
+    get_recipient,
+    get_stream,
+    get_user,
     Client,
     Message,
     Realm,
@@ -20,50 +41,86 @@ from zerver.models import (
     Stream,
     Subscription,
     UserMessage,
+    UserProfile,
 )
 
+from zerver.lib.request import JsonableError
+
+import collections
 import base64
+import mock
 import os
 import re
+import sys
 import time
 import ujson
-import urllib
+import unittest
+from six.moves import urllib
+from six import binary_type
+from zerver.lib.str_utils import NonBinaryStr
 
 from contextlib import contextmanager
+import six
+import fakeldap
+import ldap
 
-API_KEYS = {}
+class MockLDAP(fakeldap.MockLDAP):
+    class LDAPError(ldap.LDAPError):
+        pass
+
+    class INVALID_CREDENTIALS(ldap.INVALID_CREDENTIALS):
+        pass
+
+    class NO_SUCH_OBJECT(ldap.NO_SUCH_OBJECT):
+        pass
+
+    class ALREADY_EXISTS(ldap.ALREADY_EXISTS):
+        pass
 
 @contextmanager
-def stub(obj, name, f):
-    old_f = getattr(obj, name)
-    setattr(obj, name, f)
-    yield
-    setattr(obj, name, old_f)
+def stub_event_queue_user_events(event_queue_return, user_events_return):
+    # type: (Any, Any) -> Iterator[None]
+    with mock.patch('zerver.lib.events.request_event_queue',
+                    return_value=event_queue_return):
+        with mock.patch('zerver.lib.events.get_user_events',
+                        return_value=user_events_return):
+            yield
 
 @contextmanager
 def simulated_queue_client(client):
+    # type: (type) -> Iterator[None]
     real_SimpleQueueClient = queue_processors.SimpleQueueClient
-    queue_processors.SimpleQueueClient = client
+    queue_processors.SimpleQueueClient = client  # type: ignore # https://github.com/JukkaL/mypy/issues/1152
     yield
-    queue_processors.SimpleQueueClient = real_SimpleQueueClient
+    queue_processors.SimpleQueueClient = real_SimpleQueueClient  # type: ignore # https://github.com/JukkaL/mypy/issues/1152
 
 @contextmanager
 def tornado_redirected_to_list(lst):
+    # type: (List[Mapping[str, Any]]) -> Iterator[None]
     real_event_queue_process_notification = event_queue.process_notification
-    event_queue.process_notification = lst.append
+    event_queue.process_notification = lambda notice: lst.append(notice)
+    # process_notification takes a single parameter called 'notice'.
+    # lst.append takes a single argument called 'object'.
+    # Some code might call process_notification using keyword arguments,
+    # so mypy doesn't allow assigning lst.append to process_notification
+    # So explicitly change parameter name to 'notice' to work around this problem
     yield
     event_queue.process_notification = real_event_queue_process_notification
 
 @contextmanager
 def simulated_empty_cache():
-    cache_queries = []
+    # type: () -> Generator[List[Tuple[str, Union[Text, List[Text]], Text]], None, None]
+    cache_queries = []  # type: List[Tuple[str, Union[Text, List[Text]], Text]]
+
     def my_cache_get(key, cache_name=None):
+        # type: (Text, Optional[str]) -> Optional[Dict[Text, Any]]
         cache_queries.append(('get', key, cache_name))
         return None
 
-    def my_cache_get_many(keys, cache_name=None):
+    def my_cache_get_many(keys, cache_name=None):  # nocoverage -- simulated code doesn't use this
+        # type: (List[Text], Optional[str]) -> Dict[Text, Any]
         cache_queries.append(('getmany', keys, cache_name))
-        return None
+        return {}
 
     old_get = cache.cache_get
     old_get_many = cache.cache_get_many
@@ -74,277 +131,347 @@ def simulated_empty_cache():
     cache.cache_get_many = old_get_many
 
 @contextmanager
-def queries_captured():
+def queries_captured(include_savepoints=False):
+    # type: (Optional[bool]) -> Generator[List[Dict[str, Union[str, binary_type]]], None, None]
     '''
     Allow a user to capture just the queries executed during
     the with statement.
     '''
 
-    queries = []
+    queries = []  # type: List[Dict[str, Union[str, binary_type]]]
 
     def wrapper_execute(self, action, sql, params=()):
+        # type: (TimeTrackingCursor, Callable, NonBinaryStr, Iterable[Any]) -> None
+        cache = get_cache_backend(None)
+        cache.clear()
         start = time.time()
         try:
             return action(sql, params)
         finally:
             stop = time.time()
             duration = stop - start
-            queries.append({
-                    'sql': self.mogrify(sql, params),
+            if include_savepoints or ('SAVEPOINT' not in sql):
+                queries.append({
+                    'sql': self.mogrify(sql, params).decode('utf-8'),
                     'time': "%.3f" % duration,
-                    })
+                })
 
     old_execute = TimeTrackingCursor.execute
     old_executemany = TimeTrackingCursor.executemany
 
     def cursor_execute(self, sql, params=()):
-        return wrapper_execute(self, super(TimeTrackingCursor, self).execute, sql, params)
-    TimeTrackingCursor.execute = cursor_execute
+        # type: (TimeTrackingCursor, NonBinaryStr, Iterable[Any]) -> None
+        return wrapper_execute(self, super(TimeTrackingCursor, self).execute, sql, params)  # type: ignore # https://github.com/JukkaL/mypy/issues/1167
+    TimeTrackingCursor.execute = cursor_execute  # type: ignore # https://github.com/JukkaL/mypy/issues/1167
 
     def cursor_executemany(self, sql, params=()):
-        return wrapper_execute(self, super(TimeTrackingCursor, self).executemany, sql, params)
-    TimeTrackingCursor.executemany = cursor_executemany
+        # type: (TimeTrackingCursor, NonBinaryStr, Iterable[Any]) -> None
+        return wrapper_execute(self, super(TimeTrackingCursor, self).executemany, sql, params)  # type: ignore # https://github.com/JukkaL/mypy/issues/1167 # nocoverage -- doesn't actually get used in tests
+    TimeTrackingCursor.executemany = cursor_executemany  # type: ignore # https://github.com/JukkaL/mypy/issues/1167
 
     yield queries
 
-    TimeTrackingCursor.execute = old_execute
-    TimeTrackingCursor.executemany = old_executemany
+    TimeTrackingCursor.execute = old_execute  # type: ignore # https://github.com/JukkaL/mypy/issues/1167
+    TimeTrackingCursor.executemany = old_executemany  # type: ignore # https://github.com/JukkaL/mypy/issues/1167
 
+@contextmanager
+def stdout_suppressed():
+    # type: () -> Iterator[IO[str]]
+    """Redirect stdout to /dev/null."""
+
+    with open(os.devnull, 'a') as devnull:
+        stdout, sys.stdout = sys.stdout, devnull  # type: ignore # monkey-patching
+        yield stdout
+        sys.stdout = stdout
+
+def get_test_image_file(filename):
+    # type: (str) -> IO[Any]
+    test_avatar_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../tests/images'))
+    return open(os.path.join(test_avatar_dir, filename), 'rb')
+
+def avatar_disk_path(user_profile, medium=False):
+    # type: (UserProfile, bool) -> str
+    avatar_url_path = avatar_url(user_profile, medium)
+    avatar_disk_path = os.path.join(settings.LOCAL_UPLOADS_DIR, "avatars",
+                                    avatar_url_path.split("/")[-2],
+                                    avatar_url_path.split("/")[-1].split("?")[0])
+    return avatar_disk_path
+
+def make_client(name):
+    # type: (str) -> Client
+    client, _ = Client.objects.get_or_create(name=name)
+    return client
 
 def find_key_by_email(address):
+    # type: (Text) -> Optional[Text]
     from django.core.mail import outbox
-    key_regex = re.compile("accounts/do_confirm/([a-f0-9]{40})>")
+    key_regex = re.compile("accounts/do_confirm/([a-z0-9]{24})>")
     for message in reversed(outbox):
         if address in message.to:
             return key_regex.search(message.body).groups()[0]
+    return None  # nocoverage -- in theory a test might want this case, but none do
 
-def message_ids(result):
-    return set(message['id'] for message in result['messages'])
+def find_pattern_in_email(address, pattern):
+    # type: (Text, Text) -> Optional[Text]
+    from django.core.mail import outbox
+    key_regex = re.compile(pattern)
+    for message in reversed(outbox):
+        if address in message.to:
+            return key_regex.search(message.body).group(0)
+    return None  # nocoverage -- in theory a test might want this case, but none do
 
 def message_stream_count(user_profile):
+    # type: (UserProfile) -> int
     return UserMessage.objects. \
         select_related("message"). \
         filter(user_profile=user_profile). \
         count()
 
 def most_recent_usermessage(user_profile):
+    # type: (UserProfile) -> UserMessage
     query = UserMessage.objects. \
         select_related("message"). \
         filter(user_profile=user_profile). \
         order_by('-message')
-    return query[0] # Django does LIMIT here
+    return query[0]  # Django does LIMIT here
 
 def most_recent_message(user_profile):
+    # type: (UserProfile) -> Message
     usermessage = most_recent_usermessage(user_profile)
     return usermessage.message
 
+def get_subscription(stream_name, user_profile):
+    # type: (Text, UserProfile) -> Subscription
+    stream = get_stream(stream_name, user_profile.realm)
+    recipient = get_recipient(Recipient.STREAM, stream.id)
+    return Subscription.objects.get(user_profile=user_profile,
+                                    recipient=recipient, active=True)
+
 def get_user_messages(user_profile):
+    # type: (UserProfile) -> List[Message]
     query = UserMessage.objects. \
         select_related("message"). \
         filter(user_profile=user_profile). \
         order_by('message')
     return [um.message for um in query]
 
-class DummyObject:
-    pass
-
-class DummyTornadoRequest:
-    def __init__(self):
-        self.connection = DummyObject()
-        self.connection.stream = DummyStream()
-
 class DummyHandler(object):
-    def __init__(self, assert_callback):
-        self.assert_callback = assert_callback
-        self.request = DummyTornadoRequest()
-
-    # Mocks RequestHandler.async_callback, which wraps a callback to
-    # handle exceptions.  We return the callback as-is.
-    def async_callback(self, cb):
-        return cb
-
-    def write(self, response):
-        raise NotImplemented
-
-    def zulip_finish(self, response, *ignore):
-        if self.assert_callback:
-            self.assert_callback(response)
-
-
-class DummySession(object):
-    session_key = "0"
-
-class DummyStream:
-    def closed(self):
-        return False
+    def __init__(self):
+        # type: () -> None
+        allocate_handler_id(self)  # type: ignore # this is a testing mock
 
 class POSTRequestMock(object):
     method = "POST"
 
-    def __init__(self, post_data, user_profile, assert_callback=None):
-        self.REQUEST = self.POST = post_data
+    def __init__(self, post_data, user_profile):
+        # type: (Dict[str, Any], Optional[UserProfile]) -> None
+        self.GET = {}  # type: Dict[str, Any]
+        self.POST = post_data
         self.user = user_profile
-        self._tornado_handler = DummyHandler(assert_callback)
-        self.session = DummySession()
-        self._log_data = {}
+        self._tornado_handler = DummyHandler()
+        self._log_data = {}  # type: Dict[str, Any]
         self.META = {'PATH_INFO': 'test'}
-        self._log_data = {}
 
-class AuthedTestCase(TestCase):
-    # Helper because self.client.patch annoying requires you to urlencode
-    def client_patch(self, url, info={}, **kwargs):
-        info = urllib.urlencode(info)
-        return self.client.patch(url, info, **kwargs)
-    def client_put(self, url, info={}, **kwargs):
-        info = urllib.urlencode(info)
-        return self.client.put(url, info, **kwargs)
-    def client_delete(self, url, info={}, **kwargs):
-        info = urllib.urlencode(info)
-        return self.client.delete(url, info, **kwargs)
+class HostRequestMock(object):
+    """A mock request object where get_host() works.  Useful for testing
+    routes that use Zulip's subdomains feature"""
 
-    def login(self, email, password=None):
-        if password is None:
-            password = initial_password(email)
-        return self.client.post('/accounts/login/',
-                                {'username':email, 'password':password})
+    def __init__(self, host=settings.EXTERNAL_HOST):
+        # type: (Text) -> None
+        self.host = host
 
-    def register(self, username, password, domain="zulip.com"):
-        self.client.post('/accounts/home/',
-                         {'email': username + "@" + domain})
-        return self.submit_reg_form_for_user(username, password, domain=domain)
+    def get_host(self):
+        # type: () -> Text
+        return self.host
 
-    def submit_reg_form_for_user(self, username, password, domain="zulip.com"):
-        """
-        Stage two of the two-step registration process.
+class MockPythonResponse(object):
+    def __init__(self, text, status_code):
+        # type: (Text, int) -> None
+        self.text = text
+        self.status_code = status_code
 
-        If things are working correctly the account should be fully
-        registered after this call.
-        """
-        return self.client.post('/accounts/register/',
-                                {'full_name': username, 'password': password,
-                                 'key': find_key_by_email(username + '@' + domain),
-                                 'terms': True})
+    @property
+    def ok(self):
+        # type: () -> bool
+        return self.status_code == 200
 
-    def get_api_key(self, email):
-        if email not in API_KEYS:
-            API_KEYS[email] =  get_user_profile_by_email(email).api_key
-        return API_KEYS[email]
+INSTRUMENTING = os.environ.get('TEST_INSTRUMENT_URL_COVERAGE', '') == 'TRUE'
+INSTRUMENTED_CALLS = []  # type: List[Dict[str, Any]]
 
-    def api_auth(self, email):
-        credentials = "%s:%s" % (email, self.get_api_key(email))
-        return {
-            'HTTP_AUTHORIZATION': 'Basic ' + base64.b64encode(credentials)
-            }
+UrlFuncT = Callable[..., HttpResponse]  # TODO: make more specific
 
-    def get_streams(self, email):
-        """
-        Helper function to get the stream names for a user
-        """
-        user_profile = get_user_profile_by_email(email)
-        subs = Subscription.objects.filter(
-            user_profile    = user_profile,
-            active          = True,
-            recipient__type = Recipient.STREAM)
-        return [get_display_recipient(sub.recipient) for sub in subs]
+def append_instrumentation_data(data):
+    # type: (Dict[str, Any]) -> None
+    INSTRUMENTED_CALLS.append(data)
 
-    def send_message(self, sender_name, recipient_list, message_type,
-                     content="test content", subject="test", **kwargs):
-        sender = get_user_profile_by_email(sender_name)
-        if message_type == Recipient.PERSONAL:
-            message_type_name = "private"
-        else:
-            message_type_name = "stream"
-        if isinstance(recipient_list, basestring):
-            recipient_list = [recipient_list]
-        (sending_client, _) = Client.objects.get_or_create(name="test suite")
+def instrument_url(f):
+    # type: (UrlFuncT) -> UrlFuncT
+    if not INSTRUMENTING:  # nocoverage -- option is always enabled; should we remove?
+        return f
+    else:
+        def wrapper(self, url, info={}, **kwargs):
+            # type: (Any, Text, Dict[str, Any], **Any) -> HttpResponse
+            start = time.time()
+            result = f(self, url, info, **kwargs)
+            delay = time.time() - start
+            test_name = self.id()
+            if '?' in url:
+                url, extra_info = url.split('?', 1)
+            else:
+                extra_info = ''
 
-        return check_send_message(
-            sender, sending_client, message_type_name, recipient_list, subject,
-            content, forged=False, forged_timestamp=None,
-            forwarder_user_profile=sender, realm=sender.realm, **kwargs)
+            append_instrumentation_data(dict(
+                url=url,
+                status_code=result.status_code,
+                method=f.__name__,
+                delay=delay,
+                extra_info=extra_info,
+                info=info,
+                test_name=test_name,
+                kwargs=kwargs))
+            return result
+        return wrapper
 
-    def get_old_messages(self, anchor=1, num_before=100, num_after=100):
-        post_params = {"anchor": anchor, "num_before": num_before,
-                       "num_after": num_after}
-        result = self.client.post("/json/get_old_messages", dict(post_params))
-        data = ujson.loads(result.content)
-        return data['messages']
+def write_instrumentation_reports(full_suite):
+    # type: (bool) -> None
+    if INSTRUMENTING:
+        calls = INSTRUMENTED_CALLS
 
-    def users_subscribed_to_stream(self, stream_name, realm_domain):
-        realm = Realm.objects.get(domain=realm_domain)
-        stream = Stream.objects.get(name=stream_name, realm=realm)
-        recipient = Recipient.objects.get(type_id=stream.id, type=Recipient.STREAM)
-        subscriptions = Subscription.objects.filter(recipient=recipient, active=True)
+        from zproject.urls import urlpatterns, v1_api_and_json_patterns
 
-        return [subscription.user_profile for subscription in subscriptions]
+        # Find our untested urls.
+        pattern_cnt = collections.defaultdict(int)  # type: Dict[str, int]
 
-    def assert_json_success(self, result):
-        """
-        Successful POSTs return a 200 and JSON of the form {"result": "success",
-        "msg": ""}.
-        """
-        self.assertEqual(result.status_code, 200, result)
-        json = ujson.loads(result.content)
-        self.assertEqual(json.get("result"), "success")
-        # We have a msg key for consistency with errors, but it typically has an
-        # empty value.
-        self.assertIn("msg", json)
-        return json
+        def re_strip(r):
+            # type: (Any) -> str
+            return str(r).lstrip('^').rstrip('$')
 
-    def get_json_error(self, result, status_code=400):
-        self.assertEqual(result.status_code, status_code)
-        json = ujson.loads(result.content)
-        self.assertEqual(json.get("result"), "error")
-        return json['msg']
+        def find_patterns(patterns, prefixes):
+            # type: (List[Any], List[str]) -> None
+            for pattern in patterns:
+                find_pattern(pattern, prefixes)
 
-    def assert_json_error(self, result, msg, status_code=400):
-        """
-        Invalid POSTs return an error status code and JSON of the form
-        {"result": "error", "msg": "reason"}.
-        """
-        self.assertEqual(self.get_json_error(result, status_code=status_code), msg)
+        def cleanup_url(url):
+            # type: (str) -> str
+            if url.startswith('/'):
+                url = url[1:]
+            if url.startswith('http://testserver/'):
+                url = url[len('http://testserver/'):]
+            if url.startswith('http://zulip.testserver/'):
+                url = url[len('http://zulip.testserver/'):]
+            if url.startswith('http://testserver:9080/'):
+                url = url[len('http://testserver:9080/'):]
+            return url
 
-    def assert_length(self, queries, count, exact=False):
-        actual_count = len(queries)
-        if exact:
-            return self.assertTrue(actual_count == count,
-                                   "len(%s) == %s, != %s" % (queries, actual_count, count))
-        return self.assertTrue(actual_count <= count,
-                               "len(%s) == %s, > %s" % (queries, actual_count, count))
+        def find_pattern(pattern, prefixes):
+            # type: (Any, List[str]) -> None
 
-    def assert_json_error_contains(self, result, msg_substring):
-        self.assertIn(msg_substring, self.get_json_error(result))
+            if isinstance(pattern, type(LocaleRegexURLResolver)):
+                return  # nocoverage -- shouldn't actually happen
 
-    def fixture_data(self, type, action, file_type='json'):
-        return open(os.path.join(os.path.dirname(__file__),
-                                 "../fixtures/%s/%s_%s.%s" % (type, type, action,file_type))).read()
+            if hasattr(pattern, 'url_patterns'):
+                return
 
-    # Subscribe to a stream directly
-    def subscribe_to_stream(self, email, stream_name, realm=None):
-        realm = Realm.objects.get(domain=resolve_email_to_domain(email))
-        stream, _ = create_stream_if_needed(realm, stream_name)
-        user_profile = get_user_profile_by_email(email)
-        do_add_subscription(user_profile, stream, no_log=True)
+            canon_pattern = prefixes[0] + re_strip(pattern.regex.pattern)
+            cnt = 0
+            for call in calls:
+                if 'pattern' in call:
+                    continue
 
-    # Subscribe to a stream by making an API request
-    def common_subscribe_to_streams(self, email, streams, extra_post_data = {}, invite_only=False):
-        post_data = {'subscriptions': ujson.dumps([{"name": stream} for stream in streams]),
-                     'invite_only': ujson.dumps(invite_only)}
-        post_data.update(extra_post_data)
-        result = self.client.post("/api/v1/users/me/subscriptions", post_data, **self.api_auth(email))
-        return result
+                url = cleanup_url(call['url'])
 
-    def send_json_payload(self, email, url, payload, stream_name=None, **post_params):
-        if stream_name != None:
-            self.subscribe_to_stream(email, stream_name)
+                for prefix in prefixes:
+                    if url.startswith(prefix):
+                        match_url = url[len(prefix):]
+                        if pattern.regex.match(match_url):
+                            if call['status_code'] in [200, 204, 301, 302]:
+                                cnt += 1
+                            call['pattern'] = canon_pattern
+            pattern_cnt[canon_pattern] += cnt
 
-        result = self.client.post(url, payload, **post_params)
-        self.assert_json_success(result)
+        find_patterns(urlpatterns, ['', 'en/', 'de/'])
+        find_patterns(v1_api_and_json_patterns, ['api/v1/', 'json/'])
 
-        # Check the correct message was sent
-        msg = Message.objects.filter().order_by('-id')[0]
-        self.assertEqual(msg.sender.email, email)
-        self.assertEqual(get_display_recipient(msg.recipient), stream_name)
+        assert len(pattern_cnt) > 100
+        untested_patterns = set([p for p in pattern_cnt if pattern_cnt[p] == 0])
 
-        return msg
+        exempt_patterns = set([
+            # We exempt some patterns that are called via Tornado.
+            'api/v1/events',
+            'api/v1/register',
+            # We also exempt some development environment debugging
+            # static content URLs, since the content they point to may
+            # or may not exist.
+            'coverage/(?P<path>.*)',
+            'node-coverage/(?P<path>.*)',
+            'docs/(?P<path>.*)',
+        ])
 
+        untested_patterns -= exempt_patterns
+
+        var_dir = 'var'  # TODO make sure path is robust here
+        fn = os.path.join(var_dir, 'url_coverage.txt')
+        with open(fn, 'w') as f:
+            for call in calls:
+                try:
+                    line = ujson.dumps(call)
+                    f.write(line + '\n')
+                except OverflowError:  # nocoverage -- test suite error handling
+                    print('''
+                        A JSON overflow error was encountered while
+                        producing the URL coverage report.  Sometimes
+                        this indicates that a test is passing objects
+                        into methods like client_post(), which is
+                        unnecessary and leads to false positives.
+                        ''')
+                    print(call)
+
+        if full_suite:
+            print('INFO: URL coverage report is in %s' % (fn,))
+            print('INFO: Try running: ./tools/create-test-api-docs')
+
+        if full_suite and len(untested_patterns):  # nocoverage -- test suite error handling
+            print("\nERROR: Some URLs are untested!  Here's the list of untested URLs:")
+            for untested_pattern in sorted(untested_patterns):
+                print("   %s" % (untested_pattern,))
+            sys.exit(1)
+
+def get_all_templates():
+    # type: () -> List[str]
+    templates = []
+
+    relpath = os.path.relpath
+    isfile = os.path.isfile
+    path_exists = os.path.exists
+
+    def is_valid_template(p, n):
+        # type: (Text, Text) -> bool
+        return 'webhooks' not in p \
+               and not n.startswith('.') \
+               and not n.startswith('__init__') \
+               and not n.endswith('.md') \
+               and isfile(p)
+
+    def process(template_dir, dirname, fnames):
+        # type: (str, str, Iterable[str]) -> None
+        for name in fnames:
+            path = os.path.join(dirname, name)
+            if is_valid_template(path, name):
+                templates.append(relpath(path, template_dir))
+
+    for engine in loader.engines.all():
+        template_dirs = [d for d in engine.template_dirs if path_exists(d)]
+        for template_dir in template_dirs:
+            template_dir = os.path.normpath(template_dir)
+            for dirpath, dirnames, fnames in os.walk(template_dir):
+                process(template_dir, dirpath, fnames)
+
+    return templates
+
+def unsign_subdomain_cookie(result):
+    # type: (HttpResponse) -> Dict[str, Any]
+    key = 'subdomain.signature'
+    salt = key + 'zerver.views.auth'
+    cookie = result.cookies.get(key)
+    value = signing.get_cookie_signer(salt=salt).unsign(cookie.value, max_age=15)
+    return ujson.loads(value)

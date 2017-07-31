@@ -13,21 +13,6 @@ var composebox_typeahead = (function () {
 
 var exports = {};
 
-function get_pm_recipients(query_string) {
-    // Assumes email addresses don't have commas or semicolons in them
-    return query_string.split(/\s*[,;]\s*/);
-}
-
-// Returns an array of private message recipients, removing empty elements.
-// For example, "a,,b, " => ["a", "b"]
-exports.get_cleaned_pm_recipients = function (query_string) {
-    var recipients = get_pm_recipients(query_string);
-    recipients = _.filter(recipients, function (elem) {
-        return elem.match(/\S/);
-    });
-    return recipients;
-};
-
 var seen_topics = new Dict();
 
 exports.add_topic = function (uc_stream, uc_topic) {
@@ -55,12 +40,13 @@ exports.topics_seen_for = function (stream) {
 };
 
 function get_last_recipient_in_pm(query_string) {
-    var recipients = get_pm_recipients(query_string);
+    var recipients = util.extract_pm_recipients(query_string);
     return recipients[recipients.length-1];
 }
 
-function composebox_typeahead_highlighter(item) {
-    return typeahead_helper.highlight_with_escaping(this.query, item);
+function query_matches_language(query, lang) {
+    query = query.toLowerCase();
+    return lang.indexOf(query) !== -1;
 }
 
 function query_matches_person(query, person) {
@@ -69,11 +55,20 @@ function query_matches_person(query, person) {
 
     return ( person.email    .toLowerCase().indexOf(query) !== -1
          ||  person.full_name.toLowerCase().indexOf(query) !== -1);
-
 }
 
+function query_matches_stream(query, stream) {
+    query = query.toLowerCase();
+
+    return ( stream.name       .toLowerCase().indexOf(query) !== -1
+         ||  stream.description.toLowerCase().indexOf(query) !== -1);
+}
+
+// Case-insensitive
 function query_matches_emoji(query, emoji) {
-    return (emoji.emoji_name.indexOf(query.toLowerCase()) !== -1);
+    // replaces spaces with underscores
+    query = query.split(" ").join("_");
+    return (emoji.emoji_name.toLowerCase().indexOf(query.toLowerCase()) !== -1);
 }
 
 // nextFocus is set on a keydown event to indicate where we should focus on keyup.
@@ -129,22 +124,25 @@ function handle_keydown(e) {
             // want to change focus right away in the private_message_recipient box since it
             // takes the typeaheads a little time to open after the user finishes typing, which
             // can lead to the focus moving without the autocomplete having a chance to happen.
-            if ((page_params.domain === "zulip.com" && nextFocus === "compose-send-button") ||
-                (page_params.domain !== "zulip.com" && nextFocus)) {
-                ui.focus_on(nextFocus);
+            if (nextFocus) {
+                ui_util.focus_on(nextFocus);
                 nextFocus = false;
             }
 
             // Send the message on Ctrl/Cmd-Enter or if the user has configured enter to
-            // send and the shift key is not pressed.
-            if (e.target.id === "new_message_content" && code === 13 &&
-                (e.metaKey || e.ctrlKey || (page_params.enter_sends && !e.shiftKey))
-               ) {
-                e.preventDefault();
-                if ($("#compose-send-button").attr('disabled') !== "disabled") {
-                    $("#compose-send-button").attr('disabled', 'disabled');
-                    compose.finish();
+            // send and the Shift/Ctrl/Cmd/Alt keys are not pressed.
+            // Otherwise, make sure to insert a newline instead
+            if (e.target.id === "new_message_content" && code === 13) {
+                if ((!page_params.enter_sends && (e.metaKey || e.ctrlKey)) ||
+                    (page_params.enter_sends && !(e.shiftKey || e.ctrlKey || e.metaKey || e.altKey))
+                ) {
+                    e.preventDefault();
+                    if ($("#compose-send-button").attr('disabled') !== "disabled") {
+                        $("#compose-send-button").attr('disabled', 'disabled');
+                        compose.finish();
+                    }
                 }
+                // Don't prevent default -- just let the enter key go in as usual.
             }
         }
     }
@@ -154,7 +152,7 @@ function handle_keyup(e) {
     var code = e.keyCode || e.which;
     if (code === 13 || (code === 9 && !e.shiftKey)) { // Enter key or tab key
         if (nextFocus) {
-            ui.focus_on(nextFocus);
+            ui_util.focus_on(nextFocus);
             nextFocus = false;
         }
     }
@@ -166,7 +164,7 @@ function select_on_focus(field_id) {
     // conditions in Chrome so we need to protect against infinite
     // recursion.
     var in_handler = false;
-    $("#" + field_id).focus(function (e) {
+    $("#" + field_id).focus(function () {
         if (in_handler) {
             return;
         }
@@ -179,18 +177,80 @@ function select_on_focus(field_id) {
 }
 
 exports.split_at_cursor = function (query, input) {
-    var cursor = input.caret().start;
+    var cursor = input.caret();
     return [query.slice(0, cursor), query.slice(cursor)];
+};
+
+exports.tokenize_compose_str = function (s) {
+    // This basically finds a token like "@alic" or
+    // "#Veron" as close to the end of the string as it
+    // can find it.  It wants to find white space or
+    // punctuation before the token, unless it's at the
+    // beginning of the line.  It doesn't matter what comes
+    // after the first character.
+    var i = s.length;
+
+    var min_i = s.length - 25;
+    if (min_i < 0) {
+        min_i = 0;
+    }
+
+    while (i > min_i) {
+        i -= 1;
+        switch (s[i]) {
+            case '`':
+            case '~':
+                // Code block must start on a new line
+                if (i === 2) {
+                    return s.slice(0);
+                } else if (i > 2 && s[i-3] === "\n") {
+                    return s.slice(i-2);
+                }
+                break;
+            case '#':
+            case '@':
+            case ':':
+                if (i === 0) {
+                    return s.slice(i);
+                } else if (/[\s(){}\[\]]/.test(s[i-1])) {
+                    return s.slice(i);
+                }
+        }
+    }
+
+    return '';
 };
 
 exports.compose_content_begins_typeahead = function (query) {
     var q = exports.split_at_cursor(query, this.$element)[0];
 
-    var strings = q.split(/[\s*(){}\[\]]/);
-    if (strings.length < 1) {
+    var current_token = exports.tokenize_compose_str(q);
+    if (current_token === '') {
         return false;
     }
-    var current_token = strings[strings.length-1];
+
+    // Start syntax highlighting autocompleter if the first three characters are ```
+    var syntax_token = current_token.substring(0,3);
+    if (this.options.completions.syntax && (syntax_token === '```' || syntax_token === "~~~")) {
+        // Only autocomplete if user starts typing a language after ```
+        if (current_token.length === 3) {
+            return false;
+        }
+
+        // If the only input is a space, don't autocomplete
+        current_token = current_token.substring(3);
+        if (current_token === " ") {
+            return false;
+        }
+
+        // Trim the first whitespace if it is there
+        if (current_token[0] === " ") {
+            current_token = current_token.substring(1);
+        }
+        this.completing = 'syntax';
+        this.token = current_token;
+        return Object.keys(pygments_data.langs);
+    }
 
     // Only start the emoji autocompleter if : is directly after one
     // of the whitespace or punctuation chars we split on.
@@ -207,52 +267,63 @@ exports.compose_content_begins_typeahead = function (query) {
         return emoji.emojis;
     }
 
-    if (!this.options.completions.mention) {
-        return false;
+    if (this.options.completions.mention && current_token[0] === '@') {
+        current_token = current_token.substring(1);
+        if (current_token.length < 1 || current_token.lastIndexOf('*') !== -1) {
+            return false;
+        }
+
+        this.completing = 'mention';
+        this.token = current_token;
+        var all_item = {
+            special_item_text: "all (Notify everyone)",
+            email: "all",
+            // Always sort above, under the assumption that names will
+            // be longer and only contain "all" as a substring.
+            pm_recipient_count: Infinity,
+            full_name: "all",
+        };
+        var everyone_item = {
+            special_item_text: "everyone (Notify everyone)",
+            email: "everyone",
+            pm_recipient_count: Infinity,
+            full_name: "everyone",
+        };
+        var persons = people.get_realm_persons();
+        return [].concat(persons, [all_item, everyone_item]);
     }
 
-    // Don't autocomplete more than this many characters.
-    var max_chars = 30;
-    var last_at = q.lastIndexOf('@');
-    if (last_at === -1 || last_at < q.length-1 - max_chars) {
-        return false;  // No '@', or too far back
-    }
+    if (this.options.completions.stream && current_token[0] === '#') {
+        if (current_token.length === 1) {
+            return false;
+        }
 
-    // Only match if the @ follows a space, various punctuation,
-    // or is at the beginning of the string.
-    if (last_at > 0 && "\n\t \"'(){}[]".indexOf(q[last_at-1]) === -1) {
-        return false;
-    }
+        current_token = current_token.substring(1);
 
-    current_token = q.substring(last_at + 1);
-    if (current_token.length < 1 || current_token.lastIndexOf('*') !== -1) {
-        return false;
-    }
+        // Don't autocomplete if there is a space following a '#'
+        if (current_token[0] === " ") {
+            return false;
+        }
 
-    this.completing = 'mention';
-    this.token = current_token.substring(current_token.indexOf("@")+1);
-    var all_item = {
-        special_item_text: "all (Notify everyone)",
-        email: "all",
-        // Always sort above, under the assumption that names will
-        // be longer and only contain "all" as a substring.
-        pm_recipient_count: Infinity,
-        full_name: "all"
-    };
-    var everyone_item = {
-        special_item_text: "everyone (Notify everyone)",
-        email: "everyone",
-        full_name: "everyone"
-    };
-    return page_params.people_list.concat([all_item, everyone_item]);
+        this.completing = 'stream';
+        this.token = current_token;
+        return stream_data.subscribed_subs();
+    }
+    return false;
 };
 
 exports.content_highlighter = function (item) {
     if (this.completing === 'emoji') {
-        return "<img class='emoji' src='" + item.emoji_url + "' /> " + item.emoji_name;
+        return typeahead_helper.render_typeahead_item({
+            primary: item.emoji_name.split("_").join(" "),
+            img_src: item.emoji_url,
+        });
     } else if (this.completing === 'mention') {
-        var item_formatted = typeahead_helper.render_person(item);
-        return typeahead_helper.highlight_with_escaping(this.token, item_formatted);
+        return typeahead_helper.render_person(item);
+    } else if (this.completing === 'stream') {
+        return typeahead_helper.render_stream(item);
+    } else if (this.completing === 'syntax') {
+        return typeahead_helper.render_typeahead_item({ primary: item });
     }
 };
 
@@ -260,35 +331,82 @@ exports.content_typeahead_selected = function (item) {
     var pieces = exports.split_at_cursor(this.query, this.$element);
     var beginning = pieces[0];
     var rest = pieces[1];
+    var textbox = this.$element;
 
     if (this.completing === 'emoji') {
-        //leading and trailing spaces are required for emoji, except if it begins a message.
-        if (beginning.lastIndexOf(":") === 0 || beginning.charAt(beginning.lastIndexOf(":") - 1) === " ") {
-            beginning = beginning.replace(/:\S+$/, "") + ":" + item.emoji_name + ": ";
+        // leading and trailing spaces are required for emoji,
+        // except if it begins a message or a new line.
+        if (beginning.lastIndexOf(":") === 0 ||
+            beginning.charAt(beginning.lastIndexOf(":") - 1) === " " ||
+            beginning.charAt(beginning.lastIndexOf(":") - 1) === "\n") {
+            beginning = (beginning.substring(0, beginning.length - this.token.length - 1)+ ":" + item.emoji_name + ": ");
         } else {
-            beginning = beginning.replace(/:\S+$/, "") + " :" + item.emoji_name + ": ";
+            beginning = (beginning.substring(0, beginning.length - this.token.length - 1) + " :" + item.emoji_name + ": ");
         }
     } else if (this.completing === 'mention') {
-        beginning = (beginning.substring(0, beginning.length - this.token.length-1)
+        beginning = (beginning.substring(0, beginning.length - this.token.length - 1)
                 + '@**' + item.full_name + '** ');
-
-        // We insert a special `all` item to the autocompleter above
-        // Don't consider it a user mention
-        if (item.email !== 'all' && item.email !== "everyone") {
-            $(document).trigger('usermention_completed.zulip', {mentioned: item});
+        $(document).trigger('usermention_completed.zulip', {mentioned: item});
+    } else if (this.completing === 'stream') {
+        beginning = (beginning.substring(0, beginning.length - this.token.length - 1)
+                + '#**' + item.name + '** ');
+        $(document).trigger('streamname_completed.zulip', {stream: item});
+    } else if (this.completing === 'syntax') {
+        // Isolate the end index of the triple backticks/tildes, including
+        // possibly a space afterward
+        var backticks = beginning.length - this.token.length;
+        if (rest === '') {
+            // If cursor is at end of input ("rest" is empty), then
+            // complete the token before the cursor, and add a closing fence
+            // after the cursor
+            beginning = beginning.substring(0, backticks) + item + '\n';
+            rest = "\n" + beginning.substring(backticks - 4, backticks).trim() + rest;
+        } else {
+            // If more text after the input, then complete the token, but don't touch
+            // "rest" (i.e. do not add a closing fence)
+            beginning = beginning.substring(0, backticks) + item;
         }
     }
 
-    // Keep the cursor after the newly inserted text, as Bootstrap will call textbox.change() to overwrite the text
-    // in the textbox.
+    // Keep the cursor after the newly inserted text, as Bootstrap will call textbox.change() to
+    // overwrite the text in the textbox.
     setTimeout(function () {
-        $('#new_message_content').caret(beginning.length, beginning.length);
+        textbox.caret(beginning.length, beginning.length);
+        // Also, trigger autosize to check if compose box needs to be resized.
+        compose_ui.autosize_textarea();
     }, 0);
     return beginning + rest;
 };
 
+exports.compose_content_matcher = function (item) {
+    if (this.completing === 'emoji') {
+        return query_matches_emoji(this.token, item);
+    } else if (this.completing === 'mention') {
+        return query_matches_person(this.token, item);
+    } else if (this.completing === 'stream') {
+        return query_matches_stream(this.token, item);
+    } else if (this.completing === 'syntax') {
+        return query_matches_language(this.token, item);
+    }
+};
+
+exports.compose_matches_sorter = function (matches) {
+    if (this.completing === 'emoji') {
+        return typeahead_helper.sort_emojis(matches, this.token);
+    } else if (this.completing === 'mention') {
+        return typeahead_helper.sort_recipients(matches, this.token,
+                                                compose_state.stream_name(),
+                                                compose_state.subject());
+    } else if (this.completing === 'stream') {
+        return typeahead_helper.sort_streams(matches, this.token);
+    } else if (this.completing === 'syntax') {
+        return typeahead_helper.sort_languages(matches, this.token);
+    }
+};
+
 exports.initialize_compose_typeahead = function (selector, completions) {
-    completions = $.extend({mention: false, emoji: false}, completions);
+    completions = $.extend(
+        {mention: false, emoji: false, stream: false, syntax: false}, completions);
 
     $(selector).typeahead({
         items: 5,
@@ -296,23 +414,11 @@ exports.initialize_compose_typeahead = function (selector, completions) {
         fixed: true,
         source: exports.compose_content_begins_typeahead,
         highlighter: exports.content_highlighter,
-        matcher: function (item) {
-            if (this.completing === 'emoji') {
-                return query_matches_emoji(this.token, item);
-            } else if (this.completing === 'mention') {
-                return query_matches_person(this.token, item);
-            }
-        },
-        sorter: function (matches) {
-            if (this.completing === 'emoji') {
-                return typeahead_helper.sort_emojis(matches, this.token);
-            } else if (this.completing === 'mention') {
-                return typeahead_helper.sort_recipients(matches, this.token);
-            }
-        },
+        matcher: exports.compose_content_matcher,
+        sorter: exports.compose_matches_sorter,
         updater: exports.content_typeahead_selected,
         stopAdvance: true, // Do not advance to the next field on a tab or enter
-        completions: completions
+        completions: completions,
     });
 };
 
@@ -339,9 +445,9 @@ exports.initialize = function () {
         $("#new_message_content").focus();
 
         return channel.post({
-            url: '/json/change_enter_sends',
+            url: '/json/users/me/enter-sends',
             idempotent: true,
-            data: {'enter_sends': page_params.enter_sends}
+            data: {enter_sends: page_params.enter_sends},
         });
     });
     $("#enter_sends").prop('checked', page_params.enter_sends);
@@ -351,78 +457,87 @@ exports.initialize = function () {
 
     // limit number of items so the list doesn't fall off the screen
     $( "#stream" ).typeahead({
-        source: function (query, process) {
+        source: function () {
             return stream_data.subscribed_streams();
         },
         items: 3,
         fixed: true,
         highlighter: function (item) {
-            var query = this.query;
-            return typeahead_helper.highlight_query_in_phrase(query, item);
+            return typeahead_helper.render_typeahead_item({ primary: item });
         },
         matcher: function (item) {
             // The matcher for "stream" is strictly prefix-based,
             // because we want to avoid mixing up streams.
             var q = this.query.trim().toLowerCase();
             return (item.toLowerCase().indexOf(q) === 0);
-        }
+        },
     });
 
     $( "#subject" ).typeahead({
-        source: function (query, process) {
+        source: function () {
             var stream_name = $("#stream").val();
             return exports.topics_seen_for(stream_name);
         },
         items: 3,
         fixed: true,
-        highlighter: composebox_typeahead_highlighter,
+        highlighter: function (item) {
+            return typeahead_helper.render_typeahead_item({ primary: item });
+        },
         sorter: function (items) {
-            var sorted = typeahead_helper.sorter(this.query, items, function (x){return x;});
+            var sorted = typeahead_helper.sorter(this.query, items, function (x) {return x;});
             if (sorted.length > 0 && sorted.indexOf(this.query) === -1) {
                 sorted.unshift(this.query);
             }
             return sorted;
-        }
+        },
     });
 
     $( "#private_message_recipient" ).typeahead({
-        source: page_params.people_list,
+        source: people.get_all_persons, // This is a function.
         items: 5,
         dropup: true,
         fixed: true,
         highlighter: function (item) {
-            var query = get_last_recipient_in_pm(this.query);
-            var item_formatted = typeahead_helper.render_person(item);
-            return typeahead_helper.highlight_with_escaping(query, item_formatted);
+            return typeahead_helper.render_person(item);
         },
         matcher: function (item) {
             var current_recipient = get_last_recipient_in_pm(this.query);
-            // If the name is only whitespace (does not contain any non-whitespace),
-            // we're between typing names; don't autocomplete anything for us.
-            if (! current_recipient.match(/\S/)) {
+            // If you type just a comma, there won't be any recipients.
+            if (!current_recipient) {
+                return false;
+            }
+            var recipients = util.extract_pm_recipients(this.query);
+            if (recipients.indexOf(item.email) > -1) {
                 return false;
             }
 
             return query_matches_person(current_recipient, item);
         },
-        sorter: typeahead_helper.sort_recipientbox_typeahead,
-        updater: function (item) {
-            var previous_recipients = exports.get_cleaned_pm_recipients(this.query);
+        sorter: function (matches) {
+            // var current_stream = compose_state.stream_name();
+            return typeahead_helper.sort_recipientbox_typeahead(
+                this.query, matches, "");
+        },
+        updater: function (item, event) {
+            var previous_recipients = typeahead_helper.get_cleaned_pm_recipients(this.query);
             previous_recipients.pop();
             previous_recipients = previous_recipients.join(", ");
             if (previous_recipients.length !== 0) {
                 previous_recipients += ", ";
             }
+            if (event && event.type === 'click') {
+                ui_util.focus_on('private_message_recipient');
+            }
             return previous_recipients + item.email + ", ";
         },
-        stopAdvance: true // Do not advance to the next field on a tab or enter
+        stopAdvance: true, // Do not advance to the next field on a tab or enter
     });
 
-    exports.initialize_compose_typeahead("#new_message_content", {mention: true, emoji: true});
+    exports.initialize_compose_typeahead("#new_message_content", {mention: true, emoji: true, stream: true, syntax: true});
 
-    $( "#private_message_recipient" ).blur(function (event) {
+    $( "#private_message_recipient" ).blur(function () {
         var val = $(this).val();
-        var recipients = exports.get_cleaned_pm_recipients(val);
+        var recipients = typeahead_helper.get_cleaned_pm_recipients(val);
         $(this).val(recipients.join(", "));
     });
 };

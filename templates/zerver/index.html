@@ -1,10 +1,6 @@
 {% extends "zerver/base.html" %}
-
 {# The app itself. #}
 {# Includes some other templates as tabs. #}
-
-{% load compressed %}
-{% load minified_js %}
 
 {% block page_params %}
 {# Insert parameters, which have been encoded with JSONEncoderForHTML. #}
@@ -16,7 +12,9 @@ var page_params = {{ page_params }};
 {% endblock %}
 
 {% block customhead %}
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link href="/static/images/logo/apple-touch-icon-precomposed.png" rel="apple-touch-icon-precomposed">
+{% stylesheet 'google_sprite' %}
 <style type="text/css">
 
 #css-loading {
@@ -33,21 +31,23 @@ var page_params = {{ page_params }};
 
 {% if nofontface %}
 {# We can't use @font-face on qtwebkit, so use differently minified CSS #}
-{% compressed_css 'app-fontcompat' %}
+{% stylesheet 'app-fontcompat' %}
 {% else %}
-{% compressed_css 'app' %}
+{% stylesheet 'app' %}
 {% endif %}
-{% minified_js 'app' %}
+{{ minified_js('app')|safe }}
 
-{% if debug %}
-{% minified_js 'app_debug' %}
-{% endif %}
+{{ render_bundle('translations') }}
+
+{{ render_bundle('katex') }}
+
+{% include "zerver/topic_is_muted.html" %}
 
 {% endblock %}
 {% block content %}
 <div id="css-loading">
-    <h3>Loading...</h3>
-    <p>If this message does not go away, please wait a couple seconds and <a href="javascript:location.reload(true)">reload</a> the page.</p>
+    <h3>{{ _('Loading...') }}</h3>
+    <p>{% trans %}If this message does not go away, please wait a couple seconds and <a href="javascript:location.reload(true)">reload</a> the page.{% endtrans %}</p>
 </div>
 
 <div id="top-screen" class="screen"></div>
@@ -56,6 +56,9 @@ var page_params = {{ page_params }};
 <div id="right-screen" class="screen"></div>
 <div id="clear-screen" class="screen"></div>
 
+<div id="settings_overlay_container" class="overlay" data-overlay="settings" aria-hidden="true">
+  {% include "zerver/settings_overlay.html" %}
+</div>
 {% include "zerver/navbar.html" %}
 
 <div class="fixed-app">
@@ -67,9 +70,36 @@ var page_params = {{ page_params }};
 </div>
 
 <div class="app">
+<div class="alert-box">
+    <div class="alert alert_sidebar alert-error home-error-bar" id="connection-error">
+        <div class="exit"></div>
+        {% trans %}<strong class="message">Unable to connect to
+        Zulip.</strong>  Updates may be delayed.{% endtrans %} {{ _('Retrying soon...') }} <a class="restart_get_events_button">{{ _('Try now.') }}</a>
+    </div>
+    <div class="alert alert_sidebar alert-error home-error-bar" id="zephyr-mirror-error">
+        <div class="exit"></div>
+        {# The below isn't tagged for translation
+        intentionally, because the feature is only used at
+        MIT. #}
+        <strong>Your Zephyr mirror is not working.</strong>
+        <span id="normal-zephyr-mirror-error-text">
+            We recommend that
+            you <a class="webathena_login">give Zulip the
+                    ability to mirror the messages for you via
+            WebAthena</a>.  If you'd prefer, you can instead
+            <a href="/zephyr-mirror" target="_blank">run the
+            Zephyr mirror script yourself</a> in a screen
+            session.
+        </span>
+        <span id="desktop-zephyr-mirror-error-text" class="notdisplayed">To fix
+          this, you'll need to use the web interface.</span>
+    </div>
+    <div class="alert alert_sidebar alert-error home-error-bar" id="home-error"></div>
+    <div class="alert alert_sidebar alert-error home-error-bar" id="reloading-application"></div>
+</div>
 <div class="app-main">
     <div class="column-left">
-          {% include "zerver/left-sidebar.html" %}
+          {% include "zerver/left_sidebar.html" %}
     </div>
     <div class="column-middle">
         <div class="column-middle-inner tab-content">
@@ -98,13 +128,6 @@ var page_params = {{ page_params }};
             </div>
                 {% include "zerver/home.html" %}
             </div>
-            <div class="tab-pane" id="subscriptions">
-                {% include "zerver/subscriptions.html" %}
-            </div>
-            <div class="tab-pane" id="administration">
-            </div>
-            <div class="tab-pane" id="settings">
-            </div>
 
             {% if show_debug %}
             <div class="tab-pane" id="debug">
@@ -114,12 +137,24 @@ var page_params = {{ page_params }};
         </div><!--/tab-content-->
     </div>
     <div class="column-right">
-          {% include "zerver/right-sidebar.html" %}
+          {% include "zerver/right_sidebar.html" %}
     </div><!--/right sidebar-->
+    {% include "zerver/lightbox_overlay.html" %}
+    {% include "zerver/subscriptions.html" %}
+    {% include "zerver/drafts.html" %}
 </div><!--/row-->
-    {% include "zerver/keyboard_shortcuts.html" %}
-    {% include "zerver/search_operators.html" %}
-    {% include "zerver/markdown_help.html" %}
+    <div class="informational-overlays overlay new-style" data-overlay="informationalOverlays" aria-hidden="true">
+        <div class="overlay-content">
+            <div class="overlay-tabs">
+                <button class="button no-style exit">&times;</button>
+            </div>
+            <div class="overlay-body">
+                {% include "zerver/keyboard_shortcuts.html" %}
+                {% include "zerver/search_operators.html" %}
+                {% include "zerver/markdown_help.html" %}
+            </div>
+        </div>
+    </div>
     {% include "zerver/invite_user.html" %}
     {% include "zerver/bankruptcy.html" %}
     {% include "zerver/logout.html" %}

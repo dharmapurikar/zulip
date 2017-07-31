@@ -1,14 +1,24 @@
-from zerver.decorator import JsonableError
+from zerver.lib.request import JsonableError
+from django.utils.translation import ugettext as _
+
+from typing import Any, Callable, Iterable, Mapping, Sequence, Text
+
 
 def check_supported_events_narrow_filter(narrow):
+    # type: (Iterable[Sequence[Text]]) -> None
     for element in narrow:
         operator = element[0]
         if operator not in ["stream", "topic", "sender", "is"]:
-            raise JsonableError("Operator %s not supported." % (operator,))
+            raise JsonableError(_("Operator %s not supported.") % (operator,))
 
 def build_narrow_filter(narrow):
+    # type: (Iterable[Sequence[Text]]) -> Callable[[Mapping[str, Any]], bool]
+    """Changes to this function should come with corresponding changes to
+    BuildNarrowFilterTest."""
     check_supported_events_narrow_filter(narrow)
+
     def narrow_filter(event):
+        # type: (Mapping[str, Any]) -> bool
         message = event["message"]
         flags = event["flags"]
         for element in narrow:
@@ -32,6 +42,9 @@ def build_narrow_filter(narrow):
                     return False
             elif operator == "is" and operand in ["starred"]:
                 if operand not in flags:
+                    return False
+            elif operator == "is" and operand == "unread":
+                if "read" in flags:
                     return False
             elif operator == "is" and operand in ["alerted", "mentioned"]:
                 if "mentioned" not in flags:

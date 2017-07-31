@@ -15,8 +15,6 @@ function confine_to_range(lo, val, hi) {
 }
 
 function size_blocks(blocks, usable_height) {
-    var n = blocks.length;
-
     var sum_height = 0;
     _.each(blocks, function (block) {
         sum_height += block.real_height;
@@ -25,7 +23,7 @@ function size_blocks(blocks, usable_height) {
     _.each(blocks, function (block) {
         var ratio = block.real_height / sum_height;
         ratio = confine_to_range(0.05, ratio, 0.85);
-        block.max_height = confine_to_range(40, usable_height * ratio, 1.2 * block.real_height);
+        block.max_height = confine_to_range(80, usable_height * ratio, 1.2 * block.real_height);
     });
 }
 
@@ -35,11 +33,11 @@ function set_user_list_heights(res, usable_height, user_presences, group_pms) {
     //    res.group_pms_max_height
     var blocks = [
         {
-            real_height: user_presences.prop('scrollHeight')
+            real_height: user_presences.prop('scrollHeight'),
         },
         {
-            real_height: group_pms.prop('scrollHeight')
-        }
+            real_height: group_pms.prop('scrollHeight'),
+        },
     ];
 
     size_blocks(blocks, usable_height);
@@ -50,9 +48,9 @@ function set_user_list_heights(res, usable_height, user_presences, group_pms) {
 
 function get_new_heights() {
     var res = {};
-    var viewport_height = viewport.height();
-    var top_navbar_height = $("#top_navbar").outerHeight(true);
-    var invite_user_link_height = $("#invite-user-link").outerHeight(true) || 0;
+    var viewport_height = message_viewport.height();
+    var top_navbar_height = $("#top_navbar").safeOuterHeight(true);
+    var invite_user_link_height = $("#invite-user-link").safeOuterHeight(true) || 0;
 
     res.bottom_whitespace_height = viewport_height * 0.4;
 
@@ -64,18 +62,12 @@ function get_new_heights() {
 
     res.stream_filters_max_height =
         res.bottom_sidebar_height
-        - $("#global_filters").outerHeight(true)
-        - $("#streams_header").outerHeight(true)
+        - $("#global_filters").safeOuterHeight(true)
+        - $("#streams_header").safeOuterHeight(true)
         - 10; // stream_filters margin-bottom
 
-    if ($("#share-the-love").is(":visible")) {
-        res.stream_filters_max_height -=
-            $("#share-the-love").outerHeight(true)
-            + 20; // share-the-love margins + 10px of ??
-    }
-
     // Don't let us crush the stream sidebar completely out of view
-    res.stream_filters_max_height = Math.max(40, res.stream_filters_max_height);
+    res.stream_filters_max_height = Math.max(80, res.stream_filters_max_height);
 
     // RIGHT SIDEBAR
     var user_presences = $('#user_presences').expectOne();
@@ -83,15 +75,15 @@ function get_new_heights() {
 
     var usable_height =
         res.right_sidebar_height
-        - $("#feedback_section").outerHeight(true)
+        - $("#feedback_section").safeOuterHeight(true)
         - parseInt(user_presences.css("marginTop"),10)
         - parseInt(user_presences.css("marginBottom"), 10)
-        - $("#userlist-header").outerHeight(true)
-        - $(".user-list-filter").outerHeight(true)
+        - $("#userlist-header").safeOuterHeight(true)
+        - $(".user-list-filter").safeOuterHeight(true)
         - invite_user_link_height
         - parseInt(group_pms.css("marginTop"),10)
         - parseInt(group_pms.css("marginBottom"), 10)
-        - $("#group-pm-header").outerHeight(true);
+        - $("#group-pm-header").safeOuterHeight(true);
 
     // set these
     // res.user_presences_max_height
@@ -109,9 +101,9 @@ function get_new_heights() {
 function left_userlist_get_new_heights() {
 
     var res = {};
-    var viewport_height = viewport.height();
-    var viewport_width = viewport.width();
-    var top_navbar_height = $(".header").outerHeight(true);
+    var viewport_height = message_viewport.height();
+    var viewport_width = message_viewport.width();
+    var top_navbar_height = $(".header").safeOuterHeight(true);
 
     var stream_filters = $('#stream_filters').expectOne();
     var user_presences = $('#user_presences').expectOne();
@@ -131,11 +123,11 @@ function left_userlist_get_new_heights() {
 
 
     res.total_leftlist_height = res.bottom_sidebar_height
-                                - $("#global_filters").outerHeight(true)
-                                - $("#streams_header").outerHeight(true)
-                                - $("#userlist-header").outerHeight(true)
-                                - $(".user-list-filter").outerHeight(true)
-                                - $("#group-pm-header").outerHeight(true)
+                                - $("#global_filters").safeOuterHeight(true)
+                                - $("#streams_header").safeOuterHeight(true)
+                                - $("#userlist-header").safeOuterHeight(true)
+                                - $(".user-list-filter").safeOuterHeight(true)
+                                - $("#group-pm-header").safeOuterHeight(true)
                                 - parseInt(stream_filters.css("marginBottom"),10)
                                 - parseInt(user_presences.css("marginTop"), 10)
                                 - parseInt(user_presences.css("marginBottom"), 10)
@@ -145,14 +137,14 @@ function left_userlist_get_new_heights() {
 
     var blocks = [
         {
-            real_height: stream_filters_real_height
+            real_height: stream_filters_real_height,
         },
         {
-            real_height: user_list_real_height
+            real_height: user_list_real_height,
         },
         {
-            real_height: group_pms_real_height
-        }
+            real_height: group_pms_real_height,
+        },
     ];
 
     size_blocks(blocks, res.total_leftlist_height);
@@ -167,6 +159,49 @@ function left_userlist_get_new_heights() {
     return res;
 }
 
+exports.watch_manual_resize = function (element) {
+    return (function on_box_resize(cb) {
+        var box = document.querySelector(element);
+
+        if (!box) {
+            blueslip.error('Bad selector in watch_manual_resize: ' + element);
+            return;
+        }
+
+        var meta = {
+            box: box,
+            height: null,
+            mousedown: false,
+        };
+
+        var box_handler = function () {
+            meta.mousedown = true;
+            meta.height = meta.box.clientHeight;
+        };
+        meta.box.addEventListener("mousedown", box_handler);
+
+        // If the user resizes the textarea manually, we use the
+        // callback to stop autosize from adjusting the height.
+        var body_handler = function () {
+            if (meta.mousedown === true) {
+                meta.mousedown = false;
+                if (meta.height !== meta.box.clientHeight) {
+                    meta.height = meta.box.clientHeight;
+                    cb.call(meta.box, meta.height);
+                }
+            }
+        };
+        document.body.addEventListener("mouseup", body_handler);
+
+        return [box_handler, body_handler];
+    }(function (height) {
+        // This callback disables autosize on the textarea.  It
+        // will be re-enabled when this component is next opened.
+        $(element).trigger("autosize.destroy")
+            .height(height + "px");
+    }));
+};
+
 exports.resize_bottom_whitespace = function (h) {
     if (page_params.autoscroll_forever) {
         $("#bottom_whitespace").height($("#compose-container")[0].offsetHeight);
@@ -175,21 +210,19 @@ exports.resize_bottom_whitespace = function (h) {
     }
 };
 
-exports.resize_page_components = function () {
-    var composebox = $("#compose");
-    var floating_recipient_bar = $("#floating_recipient_bar");
-    var desired_width;
-    if (ui.home_tab_obscured() === 'other_tab') {
-        desired_width = $("div.tab-pane.active").outerWidth();
-    } else {
-        desired_width = $("#main_div").outerWidth();
-    }
+exports.resize_stream_filters_container = function (h) {
+    h = narrow_window ? left_userlist_get_new_heights() : get_new_heights();
+    exports.resize_bottom_whitespace(h);
+    $("#stream-filters-container").css('max-height', h.stream_filters_max_height);
+    $('#stream-filters-container').perfectScrollbar('update');
+};
 
+exports.resize_page_components = function () {
     var h;
     var sidebar;
 
     if (page_params.left_side_userlist) {
-        var css_narrow_mode = viewport.is_narrow();
+        var css_narrow_mode = message_viewport.is_narrow();
 
         $("#top_navbar").removeClass("rightside-userlist");
 
@@ -200,13 +233,11 @@ exports.resize_page_components = function () {
             sidebar = $(".bottom_sidebar").expectOne();
             sidebar.append($("#user-list").expectOne());
             sidebar.append($("#group-pm-list").expectOne());
-            sidebar.append($("#share-the-love").expectOne());
             $("#user_presences").css("margin", "0px");
             $("#group-pms").css("margin", "0px");
             $("#userlist-toggle").css("display", "none");
             $("#invite-user-link").hide();
-        }
-        else if (!css_narrow_mode && narrow_window) {
+        } else if (!css_narrow_mode && narrow_window) {
             // move stuff to the right sidebar (wide mode)
             narrow_window = false;
             popovers.set_userlist_placement("right");
@@ -232,7 +263,7 @@ exports.resize_page_components = function () {
 
 var _old_width = $(window).width();
 
-exports.handler = function (e) {
+exports.handler = function () {
     var new_width = $(window).width();
 
     if (new_width !== _old_width) {
@@ -247,10 +278,13 @@ exports.handler = function (e) {
     // but before we've loaded in the messages; in that case, don't
     // try to scroll to one.
     if (current_msg_list.selected_id() !== -1) {
-        scroll_to_selected();
+        navigate.scroll_to_selected();
     }
 };
 
 return exports;
 }());
 
+if (typeof module !== 'undefined') {
+    module.exports = resize;
+}

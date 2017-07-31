@@ -1,94 +1,72 @@
 from __future__ import absolute_import
+from __future__ import print_function
 from optparse import make_option
 
-from django.conf import settings
-from django.core.management.base import BaseCommand
-from zerver.lib.actions import do_create_realm, set_default_streams
-from zerver.models import RealmAlias
+from typing import Any, Dict, Text
 
-if not settings.VOYAGER:
-    from zilencer.models import Deployment
+from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.core.management.base import BaseCommand, CommandParser
+from zerver.lib.actions import Realm, do_create_realm, set_default_streams
+from zerver.models import get_realm
 
 import re
 import sys
 
 class Command(BaseCommand):
-    help = """Create a realm for the specified domain.
+    help = """Create a realm.
 
-Usage: python manage.py create_realm --domain=foo.com --name='Foo, Inc.'"""
+Usage: ./manage.py create_realm --string_id=acme --name='Acme'"""
 
-    option_list = BaseCommand.option_list + (
-        make_option('-o', '--open-realm',
-                    dest='open_realm',
-                    action="store_true",
-                    default=False,
-                    help='Make this an open realm.'),
-        make_option('-d', '--domain',
-                    dest='domain',
-                    type='str',
-                    help='The domain for the realm.'),
-        make_option('-n', '--name',
-                    dest='name',
-                    type='str',
-                    help='The user-visible name for the realm.'),
-        make_option('--deployment',
-                    dest='deployment_id',
-                    type='int',
-                    default=None,
-                    help='Optionally, the ID of the deployment you want to associate the realm with.'),
-        )
+    def add_arguments(self, parser):
+        # type: (CommandParser) -> None
+        parser.add_argument('-s', '--string_id',
+                            dest='string_id',
+                            type=str,
+                            help="A short name for the realm. If this "
+                                 "installation uses subdomains, this will be "
+                                 "used as the realm's subdomain.")
 
-    def validate_domain(self, domain):
-        # Domains can't contain whitespace if they are to be used in memcached
-        # keys.
-        if re.search("\s", domain):
-            raise ValueError("Domains can't contain whitespace")
+        parser.add_argument('-n', '--name',
+                            dest='name',
+                            type=str,
+                            help='The user-visible name for the realm.')
 
-        # Domains must look like domains, ie have the structure of
-        # <subdomain(s)>.<tld>. One reason for this is that bots need
-        # to have valid looking emails.
-        if len(domain.split(".")) < 2:
-            raise ValueError("Domains must contain a '.'")
+        parser.add_argument('--corporate',
+                            dest='org_type',
+                            action="store_const",
+                            const=Realm.CORPORATE,
+                            default=None,
+                            help='Is a corporate org_type. Is the default.')
 
-        if RealmAlias.objects.filter(domain=domain).count() > 0:
-            raise ValueError("Cannot create a new realm that is already an alias for an existing realm")
+        parser.add_argument('--community',
+                            dest='org_type',
+                            action="store_const",
+                            const=Realm.COMMUNITY,
+                            help='Is a community org_type.')
 
     def handle(self, *args, **options):
-        if options["domain"] is None or options["name"] is None:
-            print >>sys.stderr, "\033[1;31mPlease provide both a domain and name.\033[0m\n"
-            self.print_help("python manage.py", "create_realm")
-            exit(1)
-
-        if options["open_realm"] and options["deployment_id"] is not None:
-            print >>sys.stderr, "\033[1;31mExternal deployments cannot be open realms.\033[0m\n"
-            self.print_help("python manage.py", "create_realm")
-            exit(1)
-        if options["deployment_id"] is not None and settings.VOYAGER:
-            print >>sys.stderr, "\033[1;31mExternal deployments are not supported on voyager deployments.\033[0m\n"
-            exit(1)
-
-        domain = options["domain"]
+        # type: (*Any, **Any) -> None
+        string_id = options["string_id"]
         name = options["name"]
 
-        self.validate_domain(domain)
+        if not name or not string_id:
+            print("\033[1;31mPlease provide a name and string_id.\033[0m\n", file=sys.stderr)
+            self.print_help("./manage.py", "create_realm")
+            exit(1)
 
-        realm, created = do_create_realm(
-            domain, name, restricted_to_domain=not options["open_realm"])
+        if get_realm(string_id) is not None:
+            raise ValueError("string_id taken. Please choose another one.")
+
+        realm, created = do_create_realm(string_id, name, org_type=options["org_type"])
         if created:
-            print domain, "created."
-            if options["deployment_id"] is not None:
-                deployment = Deployment.objects.get(id=options["deployment_id"])
-                deployment.realms.add(realm)
-                deployment.save()
-                print "Added to deployment", str(deployment.id)
-            elif settings.ZULIP_COM:
-                deployment = Deployment.objects.get(base_site_url="https://zulip.com/")
-                deployment.realms.add(realm)
-                deployment.save()
-            # In the else case, we are not using the Deployments feature.
+            print(string_id, "created.")
+            stream_dict = {
+                "social": {"description": "For socializing", "invite_only": False},
+                "engineering": {"description": "For engineering", "invite_only": False}
+            }  # type: Dict[Text, Dict[Text, Any]]
+            set_default_streams(realm, stream_dict)
 
-            set_default_streams(realm, ["social", "engineering"])
-
-            print "\033[1;36mDefault streams set to social,engineering,zulip!\033[0m"
+            print("\033[1;36mDefault streams set to social,engineering,zulip!\033[0m")
         else:
-            print domain, "already exists."
+            print(string_id, "already exists.")

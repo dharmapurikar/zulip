@@ -1,43 +1,45 @@
 from __future__ import absolute_import
+from __future__ import print_function
 
-from optparse import make_option
+from typing import Any
 
-from django.core.management.base import BaseCommand
+from django.core.management.base import CommandParser
 
-from zerver.lib.actions import do_remove_subscription
-from zerver.models import Realm, UserProfile, get_stream, \
-    get_user_profile_by_email
+from zerver.lib.actions import bulk_remove_subscriptions
+from zerver.lib.management import ZulipBaseCommand
+from zerver.models import UserProfile, get_stream
 
-class Command(BaseCommand):
+class Command(ZulipBaseCommand):
     help = """Remove some or all users in a realm from a stream."""
 
-    option_list = BaseCommand.option_list + (
-        make_option('-d', '--domain',
-                    dest='domain',
-                    type='str',
-                    help='The name of the realm in which you are removing people.'),
-        make_option('-s', '--stream',
-                    dest='stream',
-                    type='str',
-                    help='A stream name.'),
-        make_option('-u', '--users',
-                    dest='users',
-                    type='str',
-                    help='A comma-separated list of email addresses.'),
-        make_option('-a', '--all-users',
-                    dest='all_users',
-                    action="store_true",
-                    default=False,
-                    help='Remove all users in this realm from this stream.'),
-        )
+    def add_arguments(self, parser):
+        # type: (CommandParser) -> None
+        parser.add_argument('-s', '--stream',
+                            dest='stream',
+                            type=str,
+                            help='A stream name.')
+
+        parser.add_argument('-u', '--users',
+                            dest='users',
+                            type=str,
+                            help='A comma-separated list of email addresses.')
+
+        parser.add_argument('-a', '--all-users',
+                            dest='all_users',
+                            action="store_true",
+                            default=False,
+                            help='Remove all users in this realm from this stream.')
+        self.add_realm_args(parser, True)
 
     def handle(self, **options):
-        if options["domain"] is None or options["stream"] is None or \
-                (options["users"] is None and options["all_users"] is None):
-            self.print_help("python manage.py", "remove_users_from_stream")
+        # type: (**Any) -> None
+        realm = self.get_realm(options)
+
+        if realm is None or options["stream"] is None or \
+                (options["users"] is None and not options["all_users"]):
+            self.print_help("./manage.py", "remove_users_from_stream")
             exit(1)
 
-        realm = Realm.objects.get(domain=options["domain"])
         stream_name = options["stream"].strip()
         stream = get_stream(stream_name, realm)
 
@@ -47,10 +49,14 @@ class Command(BaseCommand):
             emails = set([email.strip() for email in options["users"].split(",")])
             user_profiles = []
             for email in emails:
-                user_profiles.append(get_user_profile_by_email(email))
+                user_profiles.append(self.get_user(email, realm))
+
+        result = bulk_remove_subscriptions(user_profiles, [stream])
+        not_subscribed = result[1]
+        not_subscribed_users = {tup[0] for tup in not_subscribed}
 
         for user_profile in user_profiles:
-            did_remove = do_remove_subscription(user_profile, stream)
-            print "%s %s from %s" % (
-                "Removed" if did_remove else "Couldn't remove",
-                user_profile.email, stream_name)
+            if user_profile in not_subscribed_users:
+                print("%s was not subscribed" % (user_profile.email,))
+            else:
+                print("Removed %s from %s" % (user_profile.email, stream_name))

@@ -1,24 +1,39 @@
 from __future__ import absolute_import
+from __future__ import print_function
 
-from django.core.management.base import BaseCommand
-from zerver.models import Realm
-from zerver.lib.actions import do_add_realm_emoji, do_remove_realm_emoji
+from argparse import RawTextHelpFormatter
+from typing import Any
+
+from argparse import ArgumentParser
+from django.core.management.base import BaseCommand, CommandParser
+from zerver.models import Realm, get_realm
+from zerver.lib.actions import check_add_realm_emoji, do_remove_realm_emoji
 import sys
+import six
 
 class Command(BaseCommand):
     help = """Manage emoji for the specified realm
 
-Example: python manage.py realm_emoji --realm=zulip.com --op=add robotheart  https://humbug-user-avatars.s3.amazonaws.com/95ffa70fe0e7aea3c052ba91b38a28d8779f5705
-Example: python manage.py realm_emoji --realm=zulip.com --op=remove robotheart
-Example: python manage.py realm_emoji --realm=zulip.com --op=show
+Example: ./manage.py realm_emoji --realm=zulip.com --op=add robotheart \\
+    https://humbug-user-avatars.s3.amazonaws.com/95ffa70fe0e7aea3c052ba91b38a28d8779f5705
+Example: ./manage.py realm_emoji --realm=zulip.com --op=remove robotheart
+Example: ./manage.py realm_emoji --realm=zulip.com --op=show
 """
 
+    # Fix support for multi-line usage
+    def create_parser(self, *args, **kwargs):
+        # type: (*Any, **Any) -> CommandParser
+        parser = super(Command, self).create_parser(*args, **kwargs)
+        parser.formatter_class = RawTextHelpFormatter
+        return parser
+
     def add_arguments(self, parser):
+        # type: (ArgumentParser) -> None
         parser.add_argument('-r', '--realm',
-                            dest='domain',
+                            dest='string_id',
                             type=str,
                             required=True,
-                            help='The name of the realm.')
+                            help='The subdomain or string_id of the realm.')
         parser.add_argument('--op',
                             dest='op',
                             type=str,
@@ -30,27 +45,28 @@ Example: python manage.py realm_emoji --realm=zulip.com --op=show
                             help="URL of image to display for the emoji")
 
     def handle(self, *args, **options):
-        realm = Realm.objects.get(domain=options["domain"])
+        # type: (*Any, **str) -> None
+        realm = get_realm(options["string_id"])
         if options["op"] == "show":
-            for name, url in realm.get_emoji().iteritems():
-                print name, url
+            for name, url in six.iteritems(realm.get_emoji()):
+                print(name, url)
             sys.exit(0)
 
         name = options['name']
         if name is None:
-            self.print_help("python manage.py", "realm_emoji")
+            self.print_help("./manage.py", "realm_emoji")
             sys.exit(1)
 
         if options["op"] == "add":
             img_url = options['img_url']
             if img_url is None:
-                self.print_help("python manage.py", "realm_emoji")
+                self.print_help("./manage.py", "realm_emoji")
                 sys.exit(1)
-            do_add_realm_emoji(realm, name, img_url)
+            check_add_realm_emoji(realm, name, img_url)
             sys.exit(0)
         elif options["op"] == "remove":
             do_remove_realm_emoji(realm, name)
             sys.exit(0)
         else:
-            self.print_help("python manage.py", "realm_emoji")
+            self.print_help("./manage.py", "realm_emoji")
             sys.exit(1)

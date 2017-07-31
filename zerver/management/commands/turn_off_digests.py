@@ -1,46 +1,47 @@
 from __future__ import absolute_import
+from __future__ import print_function
 
-from optparse import make_option
+from typing import Any
 
-from django.core.management.base import BaseCommand
+from django.core.management.base import CommandParser
 
-from zerver.lib.actions import do_change_enable_digest_emails
-from zerver.models import Realm, UserProfile, get_user_profile_by_email
+from zerver.lib.actions import do_change_notification_settings
+from zerver.lib.management import ZulipBaseCommand
+from zerver.models import UserProfile
 
-class Command(BaseCommand):
-    help = """Turn off digests for a domain or specified set of email addresses."""
+class Command(ZulipBaseCommand):
+    help = """Turn off digests for a subdomain/string_id or specified set of email addresses."""
 
-    option_list = BaseCommand.option_list + (
-        make_option('-d', '--domain',
-                    dest='domain',
-                    type='str',
-                    help='Turn off digests for all users in this domain.'),
-        make_option('-u', '--users',
-                    dest='users',
-                    type='str',
-                    help='Turn off digests for this comma-separated list of email addresses.'),
-        )
+    def add_arguments(self, parser):
+        # type: (CommandParser) -> None
+        parser.add_argument('-u', '--users',
+                            dest='users',
+                            type=str,
+                            help='Turn off digests for this comma-separated '
+                                 'list of email addresses.')
+        self.add_realm_args(parser)
 
     def handle(self, **options):
-        if options["domain"] is None and options["users"] is None:
-            self.print_help("python manage.py", "turn_off_digests")
+        # type: (**str) -> None
+        realm = self.get_realm(options)
+        if realm is None and options["users"] is None:
+            self.print_help("./manage.py", "turn_off_digests")
             exit(1)
 
-        if options["domain"]:
-            realm = Realm.objects.get(domain=options["domain"])
+        if realm and not options["users"]:
             user_profiles = UserProfile.objects.filter(realm=realm)
         else:
             emails = set([email.strip() for email in options["users"].split(",")])
             user_profiles = []
             for email in emails:
-                user_profiles.append(get_user_profile_by_email(email))
+                user_profiles.append(self.get_user(email, realm))
 
-        print "Turned off digest emails for:"
+        print("Turned off digest emails for:")
         for user_profile in user_profiles:
             already_disabled_prefix = ""
             if user_profile.enable_digest_emails:
-                do_change_enable_digest_emails(user_profile, False)
+                do_change_notification_settings(user_profile, 'enable_digest_emails', False)
             else:
                 already_disabled_prefix = "(already off) "
-            print "%s%s <%s>" % (already_disabled_prefix, user_profile.full_name,
-                                 user_profile.email)
+            print("%s%s <%s>" % (already_disabled_prefix, user_profile.full_name,
+                                 user_profile.email))

@@ -9,16 +9,13 @@
     The file may still be accessible under other circumstances, so do
     not put sensitive information here. */
 
-// It's fine to use console.log etc. in this file.
-/*jslint devel: true */
-
 /*
-      print_elapsed_time("foo", foo)
+      debug.print_elapsed_time("foo", foo)
 
     evaluates to foo() and prints the elapsed time
     to the console along with the name "foo". */
 
-function print_elapsed_time(name, fun) {
+export function print_elapsed_time(name, fun) {
     var t0 = new Date().getTime();
     var out = fun();
     var t1 = new Date().getTime();
@@ -26,6 +23,41 @@ function print_elapsed_time(name, fun) {
     return out;
 }
 
+export function check_duplicate_ids() {
+    var ids = {};
+    var collisions = [];
+    var total_collisions = 0;
+
+    Array.prototype.slice.call(document.querySelectorAll("*")).forEach(function (o) {
+        if (o.id && ids[o.id]) {
+            var el = collisions.find(function (c) {
+                return c.id === o.id;
+            });
+
+            ids[o.id] += 1;
+            total_collisions += 1;
+
+            if (!el) {
+                var tag = o.tagName.toLowerCase();
+                collisions.push({
+                    id: o.id,
+                    count: 1,
+                    node: "<" + tag + " className='" + o.className + "' id='" + o.id + "'>" +
+                          "</" + tag + ">",
+                });
+            } else {
+                el.count += 1;
+            }
+        } else if (o.id) {
+            ids[o.id] = 1;
+        }
+    });
+
+    return {
+        collisions: collisions,
+        total_collisions: total_collisions,
+    };
+}
 
 /* An IterationProfiler is used for profiling parts of looping
  * constructs (like a for loop or _.each).  You mark sections of the
@@ -34,7 +66,7 @@ function print_elapsed_time(name, fun) {
  *
  * Example:
  *
- *     var ip = new IterationProfiler();
+ *     var ip = new debug.IterationProfiler();
  *     _.each(myarray, function (elem) {
  *         ip.iteration_start();
  *
@@ -57,7 +89,7 @@ function print_elapsed_time(name, fun) {
  * The _rest_of_iteration section is the region of the iteration body
  * after section b.
  */
-function IterationProfiler() {
+export function IterationProfiler() {
     this.sections = {};
     this.last_time = window.performance.now();
 }
@@ -97,5 +129,5 @@ IterationProfiler.prototype = {
                 console.log(prop, this.sections[prop]);
             }
         }
-    }
+    },
 };

@@ -1,8 +1,13 @@
-/*jslint nomen: true */
-function MessageList(table_name, filter, opts) {
+var message_list = (function () {
+
+var exports = {};
+
+exports.narrowed = undefined;
+
+exports.MessageList = function (table_name, filter, opts) {
     _.extend(this, {
         collapse_messages: true,
-        muting_enabled: true
+        muting_enabled: true,
     }, opts);
     this.view = new MessageListView(this, table_name, this.collapse_messages);
 
@@ -25,11 +30,9 @@ function MessageList(table_name, filter, opts) {
     this.num_appends = 0;
 
     return this;
-}
+};
 
-(function () {
-
-MessageList.prototype = {
+exports.MessageList.prototype = {
     add_messages: function MessageList_add_messages(messages, opts) {
         var self = this;
         var predicate = self.filter.predicate();
@@ -74,14 +77,14 @@ MessageList.prototype = {
             self.append(bottom_messages, opts);
         }
 
-        if ((self === narrowed_msg_list) && !self.empty()) {
+        if ((self === exports.narrowed) && !self.empty()) {
             // If adding some new messages to the message tables caused
             // our current narrow to no longer be empty, hide the empty
             // feed placeholder text.
             narrow.hide_empty_narrow_message();
         }
 
-        if ((self === narrowed_msg_list) && !self.empty() &&
+        if ((self === exports.narrowed) && !self.empty() &&
             (self.selected_id() === -1) && !opts.delay_render) {
             // And also select the newly arrived message.
             self.select_id(self.selected_id(), {then_scroll: true, use_closest: true});
@@ -116,9 +119,8 @@ MessageList.prototype = {
         var i = this._items.length - n;
         if (i < 0) {
             return -1;
-        } else {
-            return this._items[i].id;
         }
+        return this._items[i].id;
     },
 
     clear: function  MessageList_clear(opts) {
@@ -148,19 +150,26 @@ MessageList.prototype = {
                 use_closest: false,
                 empty_ok: false,
                 mark_read: true,
-                force_rerender: false
+                force_rerender: false,
             }, opts, {
                 id: id,
                 msg_list: this,
-                previously_selected: this._selected_id
+                previously_selected: this._selected_id,
             });
 
-        id = parseFloat(id);
-        if (isNaN(id)) {
-            blueslip.fatal("Bad message id");
+        function convert_id(str_id) {
+            var id = parseFloat(str_id);
+            if (isNaN(id)) {
+                blueslip.fatal("Bad message id " + str_id);
+            }
+            return id;
         }
 
+        id = convert_id(id);
+
         var closest_id = this.closest_id(id);
+
+        var error_data;
 
         // The name "use_closest" option is a bit legacy.  We
         // are always gonna move to the closest visible id; the flag
@@ -169,15 +178,20 @@ MessageList.prototype = {
         // pointer as needed, so only generate an error if the flag is
         // false.
         if (!opts.use_closest && closest_id !== id) {
+            error_data = {
+                table_name: this.table_name,
+                id: id,
+                closest_id: closest_id,
+            };
             blueslip.error("Selected message id not in MessageList",
-                           {table_name: this.table_name, id: id});
+                           error_data);
         }
 
         if (closest_id === -1 && !opts.empty_ok) {
-            var error_data = {
+            error_data = {
                 table_name: this.table_name,
                 id: id,
-                items_length: this._items.length
+                items_length: this._items.length,
             };
             blueslip.fatal("Cannot select id -1", error_data);
         }
@@ -213,10 +227,11 @@ MessageList.prototype = {
     // nature of local message IDs in the message list
     _lower_bound: function MessageList__lower_bound(id) {
         var self = this;
-        function less_func (msg, ref_id, a_idx) {
+        function less_func(msg, ref_id, a_idx) {
             if (self._is_localonly_id(msg.id)) {
                 // First non-local message before this one
-                var effective = self._next_nonlocal_message(self._items, a_idx, function (idx) { return idx - 1; });
+                var effective = self._next_nonlocal_message(self._items, a_idx,
+                                                            function (idx) { return idx - 1; });
                 if (effective) {
                     // Turn the 10.02 in [11, 10.02, 12] into 11.02
                     var decimal = parseFloat((msg.id % 1).toFixed(0.02));
@@ -256,16 +271,16 @@ MessageList.prototype = {
             // for lower_bound purposes, find the real leftmost index (first non-local id)
             do {
                 potential_closest_matches.push(closest);
-                closest--;
-            } while(closest > 0 && this._is_localonly_id(items[closest - 1].id));
+                closest -= 1;
+            } while (closest > 0 && this._is_localonly_id(items[closest - 1].id));
         }
         potential_closest_matches.push(closest);
 
         if (closest === items.length) {
             closest = closest - 1;
         } else {
-            // Any of the ids that we skipped over (due to them being local-only) might be the closest ID to the desired one,
-            // in case there is no exact match.
+            // Any of the ids that we skipped over (due to them being local-only) might be the
+            // closest ID to the desired one, in case there is no exact match.
             potential_closest_matches.unshift(_.last(potential_closest_matches) - 1);
             var best_match = items[closest].id;
 
@@ -273,7 +288,14 @@ MessageList.prototype = {
                 if (potential_idx < 0) {
                     return;
                 }
-                var potential_match = items[potential_idx].id;
+                var item = items[potential_idx];
+
+                if (item === undefined) {
+                    blueslip.warn('Invalid potential_idx: ' + potential_idx);
+                    return;
+                }
+
+                var potential_match = item.id;
                 // If the potential id is the closest to the requested, save that one
                 if (Math.abs(id - potential_match) < Math.abs(best_match - id)) {
                     best_match = potential_match;
@@ -304,7 +326,7 @@ MessageList.prototype = {
                 break;
             }
             next_msg_id = msg_id;
-            ++idx;
+            idx += 1;
         }
 
         if (next_msg_id > 0) {
@@ -335,15 +357,18 @@ MessageList.prototype = {
     },
 
     subscribed_bookend_content: function (stream_name) {
-        return "--- Subscribed to stream " + stream_name + " ---";
+        return i18n.t("You subscribed to stream __stream__",
+                      {stream: stream_name});
     },
 
     unsubscribed_bookend_content: function (stream_name) {
-        return "--- Unsubscribed from stream " + stream_name + " ---";
+        return i18n.t("You unsubscribed from stream __stream__",
+                      {stream: stream_name});
     },
 
     not_subscribed_bookend_content: function (stream_name) {
-        return "--- Not subscribed to stream " + stream_name + " ---";
+        return i18n.t("You are not subscribed to stream __stream__",
+                      {stream: stream_name});
     },
 
     // Maintains a trailing bookend element explaining any changes in
@@ -354,24 +379,27 @@ MessageList.prototype = {
         if (!this.narrowed) {
             return;
         }
-        var stream = narrow.stream();
+        var stream = narrow_state.stream();
         if (stream === undefined) {
             return;
         }
-        var trailing_bookend_content, subscribed = stream_data.is_subscribed(stream);
+        var trailing_bookend_content;
+        var show_button = true;
+        var subscribed = stream_data.is_subscribed(stream);
         if (subscribed) {
-            if (this.last_message_historical) {
-                trailing_bookend_content = this.subscribed_bookend_content(stream);
-            }
+            trailing_bookend_content = this.subscribed_bookend_content(stream);
         } else {
             if (!this.last_message_historical) {
                 trailing_bookend_content = this.unsubscribed_bookend_content(stream);
+
+                // For invite only streams, hide the resubscribe button
+                show_button = !stream_data.get_sub(stream).invite_only;
             } else {
                 trailing_bookend_content = this.not_subscribed_bookend_content(stream);
             }
         }
         if (trailing_bookend_content !== undefined) {
-            this.view.render_trailing_bookend(trailing_bookend_content);
+            this.view.render_trailing_bookend(trailing_bookend_content, subscribed, show_button);
         }
     },
 
@@ -467,14 +495,15 @@ MessageList.prototype = {
 
     show_edit_message: function MessageList_show_edit_message(row, edit_obj) {
         row.find(".message_edit_form").empty().append(edit_obj.form);
-        row.find(".message_content").hide();
+        row.find(".message_content, .status-message").hide();
         row.find(".message_edit").show();
         row.find(".message_edit_content").autosize();
     },
 
     hide_edit_message: function MessageList_hide_edit_message(row) {
-        row.find(".message_content").show();
+        row.find(".message_content, .status-message").show();
         row.find(".message_edit").hide();
+        row.trigger("mouseleave");
     },
 
     show_edit_topic: function MessageList_show_edit_topic(recipient_row, form) {
@@ -521,7 +550,7 @@ MessageList.prototype = {
         this.rerender();
     },
 
-    all: function MessageList_all() {
+    all_messages: function MessageList_all_messages() {
         return this._items;
     },
 
@@ -544,21 +573,43 @@ MessageList.prototype = {
         return id % 1 !== 0;
     },
 
-    _next_nonlocal_message: function MessageList__next_nonlocal_message(item_list, start_index, op) {
+    _next_nonlocal_message: function MessageList__next_nonlocal_message(item_list,
+                                                                        start_index, op) {
         var cur_idx = start_index;
         do {
             cur_idx = op(cur_idx);
-        } while(item_list[cur_idx] !== undefined && this._is_localonly_id(item_list[cur_idx].id));
+        } while (item_list[cur_idx] !== undefined && this._is_localonly_id(item_list[cur_idx].id));
         return item_list[cur_idx];
     },
 
-    change_display_recipient: function MessageList_change_display_recipient(old_recipient,
-                                                                            new_recipient) {
-        // This method only works for streams.
+    update_user_full_name: function (user_id, full_name) {
         _.each(this._items, function (item) {
-            if (item.display_recipient === old_recipient) {
-                item.display_recipient = new_recipient;
-                item.stream = new_recipient;
+            if (item.sender_id && (item.sender_id === user_id)) {
+                item.sender_full_name = full_name;
+            }
+        });
+        this.view.rerender_the_whole_thing();
+    },
+
+    update_user_avatar: function (user_id, avatar_url) {
+        // TODO:
+        // We may want to de-dup some logic with update_user_full_name,
+        // especially if we want to optimize this with some kind of
+        // hash that maps sender_id -> messages.
+        _.each(this._items, function (item) {
+            if (item.sender_id && (item.sender_id === user_id)) {
+                item.small_avatar_url = avatar_url;
+            }
+        });
+        this.view.rerender_the_whole_thing();
+    },
+
+    update_stream_name: function MessageList_update_stream_name(stream_id,
+                                                                new_stream_name) {
+        _.each(this._items, function (item) {
+            if (item.stream_id && (item.stream_id === stream_id)) {
+                item.display_recipient = new_stream_name;
+                item.stream = new_stream_name;
             }
         });
         this.view.rerender_the_whole_thing();
@@ -600,8 +651,10 @@ MessageList.prototype = {
                 return;
             }
 
-            var next = self._next_nonlocal_message(self._items, index, function (idx) { return idx + 1; });
-            var prev = self._next_nonlocal_message(self._items, index, function (idx) { return idx - 1; });
+            var next = self._next_nonlocal_message(self._items, index,
+                                                   function (idx) { return idx + 1; });
+            var prev = self._next_nonlocal_message(self._items, index,
+                                                   function (idx) { return idx - 1; });
 
             if ((next !== undefined && current_message.id > next.id) ||
                 (prev !== undefined && current_message.id < prev.id)) {
@@ -617,18 +670,34 @@ MessageList.prototype = {
                 }
             }
         }, 0);
-    }
+    },
+
+    get_last_message_sent_by_me: function () {
+        var msg_index = _.findLastIndex(this._items, {sender_id: page_params.user_id});
+        if (msg_index === -1) {
+            return;
+        }
+        var msg = this._items[msg_index];
+        return msg;
+    },
 };
+
+exports.all = new exports.MessageList(
+    undefined, undefined,
+    {muting_enabled: false}
+);
 
 // We stop autoscrolling when the user is clearly in the middle of
 // doing something.  Be careful, though, if you try to capture
 // mousemove, then you will have to contend with the autoscroll
 // itself generating mousemove events.
-$(document).on('message_selected.zulip hashchange.zulip mousewheel', function (event) {
-    viewport.stop_auto_scrolling();
+$(document).on('message_selected.zulip zuliphashchange.zulip wheel', function () {
+    message_viewport.stop_auto_scrolling();
 });
+
+return exports;
+
 }());
-/*jslint nomen: false */
 if (typeof module !== 'undefined') {
-    module.exports = MessageList;
+    module.exports = message_list;
 }

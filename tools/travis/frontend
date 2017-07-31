@@ -1,0 +1,13 @@
+#!/bin/bash
+
+source tools/travis/activate-venv
+
+set -e
+set -x
+
+./tools/test-js-with-node --coverage
+./tools/test-js-with-casper
+
+# NB: Everything here should be in `tools/test-all`.  If there's a
+# reason not to run it there, it should be there as a comment
+# explaining why.

@@ -2,10 +2,10 @@
 
 {% block portico_content %}
 
-<h1>Email settings updated</h1>
+<h1>{% trans %}Email settings updated{% endtrans %}</h1>
 
-<p>We've updated your email subscription settings, and you won't get {{ subscription_type }} emails anymore.</p>
+<p>{% trans %}We've updated your email subscription settings, and you won't get {{ subscription_type }} emails anymore.{% endtrans %}</p>
 
-<p>To undo this change or review your other subscription settings, please visit your <a href="https://{{ external_host }}/#settings">Zulip Settings page</a>.</p>
+<p>{% trans %}To undo this change or review your other subscription settings, please visit your <a href="{{ realm_uri }}/#settings">Zulip Settings page</a>.{% endtrans %}</p>
 
 {% endblock %}

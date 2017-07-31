@@ -13,12 +13,24 @@ function make_tab(title, hash, data, extra_class, home) {
 
 function make_tab_data() {
     var tabs = [];
-    var filter = narrow.filter();
+    var filter = narrow_state.filter();
+
+    function filtered_to_non_home_view_stream() {
+        if (!filter.has_operator('stream')) {
+            return false;
+        }
+        var stream_name = filter.operands('stream')[0];
+        var stream_id = stream_data.get_stream_id(stream_name);
+        if (!stream_id) {
+            return true;
+        }
+
+        return !stream_data.in_home_view(stream_id);
+    }
 
     // Root breadcrumb item: Either Home or All Messages
     if (filter !== undefined &&
-        ((filter.has_operator("stream") &&
-          !stream_data.in_home_view(filter.operands("stream")[0])) ||
+        (filtered_to_non_home_view_stream() ||
          filter.has_operand("in", "all"))) {
         tabs.push(make_tab("All Messages", "#narrow/in/all", undefined, "root"));
     } else if (page_params.narrow !== undefined) {
@@ -34,9 +46,9 @@ function make_tab_data() {
         tabs.push(make_tab('Home', "#", "home", "root", true));
     }
 
-    if (narrow.active() && narrow.operators().length > 0) {
-        var stream, ops = narrow.operators();
-        var hash = hashchange.operators_to_hash(ops);
+    if (narrow_state.active() && narrow_state.operators().length > 0) {
+        var stream;
+        var ops = narrow_state.operators();
         // Second breadcrumb item
         var hashed = hashchange.operators_to_hash(ops.slice(0, 1));
         if (filter.has_operator("stream")) {
@@ -149,10 +161,10 @@ function build_tab_bar() {
 }
 
 $(function () {
-    $(document).on('narrow_activated.zulip', function (event) {
+    $(document).on('narrow_activated.zulip', function () {
         build_tab_bar();
     });
-    $(document).on('narrow_deactivated.zulip', function (event) {
+    $(document).on('narrow_deactivated.zulip', function () {
         build_tab_bar();
     });
 
@@ -162,3 +174,7 @@ $(function () {
 return exports;
 
 }());
+
+if (typeof module !== 'undefined') {
+    module.exports = tab_bar;
+}

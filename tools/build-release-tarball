@@ -1,10 +1,27 @@
-#!/bin/sh -ex
+#!/usr/bin/env bash
+set -eux
+
+usage() {
+    echo "Usage: $0 [--py3] <ZULIP_VERSION>" >&2
+    exit 1
+}
+
+args="$(getopt -o '' -l 'py3' -n "$0" -- "$@")"
+eval "set -- $args"
+
+py3=
+while true; do
+    case "$1" in
+        --py3) py3=t; shift;;
+        --) shift; break;;
+        *) usage;;
+    esac
+done
 
 GITID=$(git rev-parse HEAD)
 
-if [ -z "$1" ]; then
-    echo "Usage: $0 <ZULIP_VERSION>"
-    exit 1
+if [ -z "${1:-}" ]; then
+    usage
 fi
 version="$1"
 prefix="zulip-server-$version"
@@ -19,8 +36,11 @@ fi
 
 if ! git diff --exit-code >/dev/null; then
     set +x
-    echo; echo "\033[31mWARNING: tarballs builds are based on a commit hash so your changes will not be included\033[0m"; echo
-    set -x
+    echo "ERROR: tarballs builds are based on a commit hash so your changes "
+    echo "will not be included; you should commit or stash them based on "
+    echo "what you want and then try again."
+    echo
+    exit 1
 fi
 
 TMP_CHECKOUT=$TMPDIR/$prefix/
@@ -38,19 +58,26 @@ else
 	echo "Check for excluded files passed";
 fi
 
+if [ "$py3" ]; then
+    tools/replace-tarball-shebang \
+        '#!/usr/bin/env python' '#!/usr/bin/env python3' \
+        < "$TARBALL" > "$TARBALL.new"
+    mv "$TARBALL.new" "$TARBALL"
+fi
+
 # Check out a temporary full copy of the index to generate static files
 git checkout-index -f -a --prefix "$TMP_CHECKOUT"
 cd "$TMP_CHECKOUT"
 
-# Use default settings so there is no chance of leaking secrets
-cp zproject/local_settings_template.py zproject/local_settings.py
+# create var/log directory in the new temporary checkout
+mkdir -p "var/log"
 
 # Some settings need to be updated for update-prod-static to work
 #
 # TODO: Would be much better to instead run the below tools with some
 # sort of environment hack to make settings.VOYAGER=True so that we
 # don't need to create this dummy secrets file.
-cat >> zproject/local_settings_template.py <<EOF
+cat >> zproject/prod_settings_template.py <<EOF
 DEBUG = False
 EOF
 cat >> zproject/dev-secrets.conf <<EOF
@@ -66,22 +93,33 @@ EOF
 # update-prod-static generates the prod-static directory.
 # See COLLECTSTATIC in settings.py
 set +x
-echo; echo "\033[33mRunning update-prod-static; check ${TMP_CHECKOUT}update-prod-static.log if it fails\033[0m"; echo
+# We do a bit of gymnastics to have update-prod-static.log be easily
+# visible to the user and end up in the same directory as the final
+# release tarball.
+USER_PROD_STATIC_LOGPATH="${TMPDIR}/update-prod-static.log"
+BUILD_PROD_STATIC_LOGPATH="${TMP_CHECKOUT}/var/log/update-prod-static.log"
+ln -nfs "$BUILD_PROD_STATIC_LOGPATH" "$USER_PROD_STATIC_LOGPATH"
 set -x
 
-./tools/update-prod-static
+./tools/update-prod-static || (
+    set +x
+    echo; echo -ne "\033[33mRunning update-prod-static failed. "
+    echo -e "Check ${TMPDIR}/update-prod-static.log for more information.\033[0m"
+    exit 1
+)
 echo "$GITID" > build_id
 echo "$version" > version
-mv update-prod-static.log ..
+rm -f "$USER_PROD_STATIC_LOGPATH"
+mv "$BUILD_PROD_STATIC_LOGPATH" "$USER_PROD_STATIC_LOGPATH"
 
 rm -f zproject/dev-secrets.conf
 
 # We don't need duplicate copies of emoji with hashed paths, and they would break bugdown
-find prod-static/serve/third/gemoji/images/emoji/ -regex '.*\.[0-9a-f]+\.png' -delete
+find prod-static/serve/generated/emoji/images/emoji/ -regex '.*\.[0-9a-f]+\.png' -delete
 
 cd "$TMPDIR"
 
-tar --append -f "$TARBALL" "$prefix/prod-static" "$prefix/build_id" "$prefix/version"
+tar --append -f "$TARBALL" "$prefix/prod-static" "$prefix/build_id" "$prefix/version" "$prefix/staticfiles.json" "$prefix/webpack-stats-production.json"
 
 rm -rf "$prefix"
 

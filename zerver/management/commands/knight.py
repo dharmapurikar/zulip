@@ -1,5 +1,9 @@
 from __future__ import absolute_import
+from __future__ import print_function
 
+from typing import Any
+
+from argparse import ArgumentParser
 from django.core.management.base import BaseCommand, CommandError
 from django.core.exceptions import ValidationError
 
@@ -14,6 +18,7 @@ ONLY perform this on customer request from an authorized person.
 """
 
     def add_arguments(self, parser):
+        # type: (ArgumentParser) -> None
         parser.add_argument('-f', '--for-real',
                             dest='ack',
                             action="store_true",
@@ -33,6 +38,7 @@ ONLY perform this on customer request from an authorized person.
                             help="email of user to knight")
 
     def handle(self, *args, **options):
+        # type: (*Any, **Any) -> None
         email = options['email']
         try:
             profile = UserProfile.objects.get(email=email)
@@ -45,16 +51,17 @@ ONLY perform this on customer request from an authorized person.
             else:
                 if options['ack']:
                     do_change_is_admin(profile, True, permission=options['permission'])
-                    print "Done!"
+                    print("Done!")
                 else:
-                    print "Would have granted %s %s rights for %s" % (email, options['permission'], profile.realm.domain)
+                    print("Would have granted %s %s rights for %s" % (
+                          email, options['permission'], profile.realm.string_id))
         else:
             if profile.has_perm(options['permission'], profile.realm):
                 if options['ack']:
                     do_change_is_admin(profile, False, permission=options['permission'])
-                    print "Done!"
+                    print("Done!")
                 else:
-                    print "Would have removed %s's %s rights on %s" % (email, options['permission'],
-                            profile.realm.domain)
+                    print("Would have removed %s's %s rights on %s" % (email, options['permission'],
+                                                                       profile.realm.string_id))
             else:
                 raise CommandError("User did not have permission for this realm!")

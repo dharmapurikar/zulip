@@ -1,48 +1,151 @@
-#!/bin/bash -xe
+#!/usr/bin/env bash
+set -xe
 
 # Assumes we've already been untarred
 
-# First, install any updates from the apt repo that may be needed
-wget -O /root/zulip-ppa.asc https://zulip.com/dist/keys/zulip-ppa.asc
-apt-key add /root/zulip-ppa.asc
-cat >/etc/apt/sources.list.d/zulip.list <<EOF
-deb http://ppa.launchpad.net/tabbott/zulip/ubuntu trusty main
-deb-src http://ppa.launchpad.net/tabbott/zulip/ubuntu trusty main
-EOF
+# Specify options for apt.
+APT_OPTIONS="${APT_OPTIONS:-}"
+# Install additional packages using apt.
+ADDITIONAL_PACKAGES=${ADDITIONAL_PACKAGES:-}
+# Deployment type is almost always voyager.
+DEPLOYMENT_TYPE="${DEPLOYMENT_TYPE:-voyager}"
+# Comma-separated list of puppet manifests to install.  default is
+# zulip::voyager for an all-in-one system or zulip::dockervoyager for
+# Docker.  Use e.g. zulip::app_frontend for a Zulip frontend server.
+PUPPET_CLASSES="${PUPPET_CLASSES:-zulip::voyager}"
+VIRTUALENV_NEEDED="${VIRTUALENV_NEEDED:-yes}"
 
-apt-get update
-apt-get -y dist-upgrade
-apt-get install -y puppet git python
+# Check for at least ~1.9GB of RAM before starting installation;
+# otherwise users will find out about insufficient RAM via weird
+# errors like a segfault running `pip install`.
+mem_kb=$(cat /proc/meminfo | head -n1 | awk '{print $2}')
+if [ "$mem_kb" -lt 1900000 ]; then
+    echo "Insufficient RAM.  Zulip requires at least 2GB of RAM."
+    exit 1
+fi
 
+if ! [ -e /usr/bin/realpath ]; then
+    # realpath is in coreutils on Xenial, but not in Trusty
+    apt-get install -y realpath
+fi
+ZULIP_PATH="$(realpath $(dirname $0)/../..)"
+
+# setup-apt-repo does an `apt-get update`
+"$ZULIP_PATH"/scripts/lib/setup-apt-repo
+
+apt-get -y dist-upgrade $APT_OPTIONS
+apt-get install -y puppet git python python3 python-six python3-six crudini $ADDITIONAL_PACKAGES
+
+# Handle issues around upstart on Ubuntu Xenial
+"$ZULIP_PATH"/scripts/lib/check-upstart
+
+# Create and activate a virtualenv
+if [ "$VIRTUALENV_NEEDED" = "yes" ]; then
+    "$ZULIP_PATH"/scripts/lib/create-production-venv "$ZULIP_PATH"
+fi
+
+"$ZULIP_PATH"/scripts/lib/install-node
+
+# puppet apply
 mkdir -p /etc/zulip
-echo -e "[machine]\npuppet_classes = zulip::voyager\ndeploy_type = voyager" > /etc/zulip/zulip.conf
-/root/zulip/scripts/zulip-puppet-apply -f
+(
+    echo -e "[machine]\npuppet_classes = $PUPPET_CLASSES\ndeploy_type = $DEPLOYMENT_TYPE";
+
+    # Note: there are four dpkg-query outputs to consider:
+    #
+    # root@host# dpkg-query --showformat '${Status}\n' -W rabbitmq-server 2>/dev/null
+    # root@host# apt install rabbitmq-server
+    # root@host# dpkg-query --showformat '${Status}\n' -W rabbitmq-server 2>/dev/null
+    # install ok installed
+    # root@host# apt remove rabbitmq-server
+    # root@host# dpkg-query --showformat '${Status}\n' -W rabbitmq-server 2>/dev/null
+    # deinstall ok config-files
+    # root@host# apt purge rabbitmq-server
+    # root@host# dpkg-query --showformat '${Status}\n' -W rabbitmq-server 2>/dev/null
+    # unknown ok not-installed
+    #
+    # (There are more possibilities in the case of dpkg errors.)  Here
+    # we are checking for either empty or not-installed.
+    if [ -n "$TRAVIS" ] || ! dpkg-query --showformat '${Status}\n' -W rabbitmq-server 2>/dev/null | grep -vq ' not-installed$'; then
+        echo -e "\n[rabbitmq]\nnodename = zulip@localhost"
+    fi
+) > /etc/zulip/zulip.conf
+"$ZULIP_PATH"/scripts/zulip-puppet-apply -f
+
+# Detect which features were selected for the below
+set +e
+[ -e "/etc/init.d/camo" ]; has_camo=$?
+[ -e "/etc/init.d/nginx" ]; has_nginx=$?
+[ -e "/etc/supervisor/conf.d/zulip.conf" ]; has_appserver=$?
+[ -e "/etc/cron.d/rabbitmq-numconsumers" ]; has_rabbit=$?
+[ -e "/etc/init.d/postgresql" ]; has_postgres=$?
+set -e
+
+# Docker service setup is done in the docker config, not here
+if [ "$DEPLOYMENT_TYPE" = "dockervoyager" ]; then
+    has_camo=1
+    has_nginx=1
+    has_appserver=1
+    has_rabbit=1
+    has_postgres=1
+fi
 
 # These server restarting bits should be moveable into puppet-land, ideally
 apt-get -y upgrade
-if [ -e "/etc/init.d/nginx" ]; then
+
+if [ "$has_nginx" = 0 ]; then
+    # Check nginx was configured properly now that we've installed it.
+    # Most common failure mode is certs not having been installed.
+    nginx -t
     service nginx restart
 fi
 
-/root/zulip/scripts/setup/generate_secrets.py
-cp -a /root/zulip/zproject/local_settings_template.py /etc/zulip/settings.py
-ln -nsf /etc/zulip/settings.py /root/zulip/zproject/local_settings.py
+if [ "$has_appserver" = 0 ]; then
+    "$ZULIP_PATH"/scripts/setup/generate_secrets.py --production
+    cp -a "$ZULIP_PATH"/zproject/prod_settings_template.py /etc/zulip/settings.py
+    ln -nsf /etc/zulip/settings.py "$ZULIP_PATH"/zproject/prod_settings.py
+fi
 
-/root/zulip/scripts/setup/configure-rabbitmq
+# Restart camo since generate_secrets.py likely replaced its secret key
+if [ "$has_camo" = 0 ] && [ -z "$TRAVIS" ]; then
+    # We don't run this in Travis CI due to a weird hang bug
+    service camo restart
+fi
 
-/root/zulip/scripts/setup/postgres-init-db
+if [ "$has_rabbit" = 0 ]; then
+    if ! rabbitmqctl status >/dev/null; then
+        set +x
+        echo; echo "RabbitMQ seems to not have started properly after the installation process."
+        echo "Often, this can be caused by misconfigured /etc/hosts in virtualized environments"
+        echo "See https://github.com/zulip/zulip/issues/53#issuecomment-143805121"
+        echo "for more information"
+        echo
+        set -x
+        exit 1
+    fi
+    "$ZULIP_PATH"/scripts/setup/configure-rabbitmq
+fi
 
-deploy_path=$(/root/zulip/zulip_tools.py make_deploy_path)
-mv /root/zulip "$deploy_path"
-ln -nsf /home/zulip/deployments/next /root/zulip
-ln -nsf "$deploy_path" /home/zulip/deployments/next
-ln -nsf "$deploy_path" /home/zulip/deployments/current
-ln -nsf /etc/zulip/settings.py "$deploy_path"/zproject/local_settings.py
-cp -rT "$deploy_path"/prod-static/serve /home/zulip/prod-static
-chown -R zulip:zulip /home/zulip /var/log/zulip /etc/zulip/settings.py
-chown zulip:zulip /var/run/supervisor.sock
+if [ "$has_postgres" = 0 ]; then
+    "$ZULIP_PATH"/scripts/setup/postgres-init-db
+fi
 
-cd /home/zulip/deployments/current
+if [ "$has_appserver" = 0 ]; then
+    deploy_path=$("$ZULIP_PATH"/scripts/lib/zulip_tools.py make_deploy_path)
+    mv "$ZULIP_PATH" "$deploy_path"
+    ln -nsf /home/zulip/deployments/next "$ZULIP_PATH"
+    ln -nsf "$deploy_path" /home/zulip/deployments/next
+    ln -nsf "$deploy_path" /home/zulip/deployments/current
+    ln -nsf /etc/zulip/settings.py "$deploy_path"/zproject/prod_settings.py
+    mkdir -p "$deploy_path"/prod-static/serve
+    cp -rT "$deploy_path"/prod-static/serve /home/zulip/prod-static
+    chown -R zulip:zulip /home/zulip /var/log/zulip /etc/zulip/settings.py
+fi
+
+if [ -e "/var/run/supervisor.sock" ]; then
+    # If supervisor isn't running, no need to chown its socket
+    chown zulip:zulip /var/run/supervisor.sock
+fi
 
 set +x
 cat <<EOF
@@ -55,4 +158,5 @@ cat <<EOF
 
  su zulip -c /home/zulip/deployments/current/scripts/setup/initialize-database
 
+ To configure the initial database.
 EOF

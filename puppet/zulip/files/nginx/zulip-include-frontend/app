@@ -10,11 +10,12 @@ error_page 502 503 504 /static/html/5xx.html;
 # Serve static files directly
 location /static/ {
     alias /home/zulip/prod-static/;
-    error_page 404 /static/html/404.html;
+    # Set a nonexistent path, so we just serve the nice Django 404 page.
+    error_page 404 /django_static_404.html;
 }
 
 # Send longpoll requests to Tornado
-location ~ /json/get_events|/json/events {
+location ~ /json/events {
     proxy_pass http://tornado;
     include /etc/nginx/zulip-include/proxy_longpolling;
 
@@ -50,29 +51,19 @@ location /sockjs {
     include /etc/nginx/zulip-include/location-sockjs;
 }
 
-# Send everything else to Django via FastCGI
+# Send everything else to Django via uWSGI
 location / {
-    include fastcgi_params;
-    fastcgi_pass django;
-    fastcgi_split_path_info ^()(.*)$;
-    # Second number set to `getconf PAGESIZE`
-    fastcgi_buffers 1024 4k;
-    fastcgi_max_temp_file_size 0;
-    fastcgi_next_upstream off;
+    include uwsgi_params;
+    uwsgi_pass django;
 }
 
 location /api/ {
     add_header Access-Control-Allow-Origin *;
     add_header Access-Control-Allow-Headers Authorization;
-    add_header Access-Control-Allow-Methods 'GET, POST';
+    add_header Access-Control-Allow-Methods 'GET, POST, DELETE, PUT, PATCH, HEAD';
 
-    include fastcgi_params;
-    fastcgi_pass django;
-    fastcgi_split_path_info ^()(.*)$;
-    # Second number set to `getconf PAGESIZE`
-    fastcgi_buffers 1024 4k;
-    fastcgi_max_temp_file_size 0;
-    fastcgi_next_upstream off;
+    include uwsgi_params;
+    uwsgi_pass  django;
 
 }
 

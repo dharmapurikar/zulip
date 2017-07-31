@@ -51,7 +51,7 @@ exports.id = function (message_row) {
 
 var valid_table_names = {
     zhome: true,
-    zfilt: true
+    zfilt: true,
 };
 
 exports.get_table = function (table_name) {
@@ -60,6 +60,15 @@ exports.get_table = function (table_name) {
     }
 
     return $('#' + table_name);
+};
+
+exports.get_message_id = function (elem) {
+    // Gets the message_id for elem, where elem is a DOM
+    // element inside a message.  This is typically used
+    // in click handlers for things like the reaction button.
+    var row = $(elem).closest(".message_row");
+    var message_id = exports.id(row);
+    return message_id;
 };
 
 exports.get_closest_group = function (element) {
@@ -94,11 +103,14 @@ exports.id_for_recipient_row = function (recipient_row) {
         // If we're narrowing from the FRB, take the msg id
         // directly from it
         return exports.id(recipient_row);
-    } else {
-        return exports.id(msg_row);
     }
+    return exports.id(msg_row);
 };
 
 return exports;
 
 }());
+
+if (typeof module !== 'undefined') {
+    module.exports = rows;
+}

@@ -11,7 +11,7 @@ function batched_updater(flag, op, immediate) {
     function server_request() {
         // Wait for server IDs before sending flags
         var real_msgs = _.filter(queue, function (msg) {
-            return msg.local_id === undefined;
+            return !msg.locally_echoed;
         });
         var real_msg_ids = _.map(real_msgs, function (msg) {
             return msg.id;
@@ -26,12 +26,12 @@ function batched_updater(flag, op, immediate) {
         // call finishes, they will be handled in the success callback.
 
         channel.post({
-            url:      '/json/update_message_flags',
+            url:      '/json/messages/flags',
             idempotent: true,
             data:     {messages: JSON.stringify(real_msg_ids),
                        op:       op,
                        flag:     flag},
-            success:  on_success
+            success:  on_success,
         });
     }
 
@@ -41,7 +41,7 @@ function batched_updater(flag, op, immediate) {
         start = _.debounce(server_request, 1000);
     }
 
-    on_success = function on_success(data, status, jqXHR) {
+    on_success = function on_success(data) {
         if (data ===  undefined || data.messages === undefined) {
             return;
         }
@@ -106,5 +106,17 @@ exports.send_force_collapse = function send_force_collapse(messages, value) {
     send_flag(messages, "force_collapse", value);
 };
 
+exports.toggle_starred = function (message) {
+    if (message.flags.indexOf("starred") === -1) {
+        exports.send_starred([message], true);
+    } else {
+        exports.send_starred([message], false);
+    }
+};
+
 return exports;
 }());
+
+if (typeof module !== 'undefined') {
+    module.exports = message_flags;
+}

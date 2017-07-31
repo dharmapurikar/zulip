@@ -1,75 +1,59 @@
 {% extends "zerver/portico_signup.html" %}
+{#
+Allow the user to accept a TOS, creating an email record of that fact.
+Users only hit this page if they are coming from a migration or other update of the TOS;
+the registration flow has its own (nearly identical) copy of the fields below in register.html.
+#}
 
-{% comment %}
-Allow the user to accept the terms, creating an email record of that fact.
-{% endcomment %}
-
-{% block for_you %}for {% if company_name %} {{company_name}} {% else %} __________ {% endif %} {% endblock %}
 {% block portico_content %}
 
-<p>(Welcome! We think you'll like it here.)</p>
-
-<div class="pitch">
-    <hr/>
-    <p>You're almost there. We just need you to do one last thing.</p>
-    <h3>Accept the Zulip terms of service</h3>
-</div>
-
-<form method="post" class="form-horizontal" id="registration" action="{% url 'zerver.views.accounts_accept_terms' %}">
-{% csrf_token %}
-    <div class="control-group">
-        <label for="id_email" class="control-label">Email</label>
-        <div class="controls fakecontrol">
-            <p>{{ email }}</p>
-        </div>
+    {% if special_message_template %}
+    {% include special_message_template %}
+    {% else %}
+    <div class="pitch">
+        <p>{{ _("There are new Terms of Service.") }}</p>
+        <h3>{{ _("Accept the terms of service") }}</h3>
     </div>
-    <div class="control-group">
-        <label for="id_full_name" class="control-label">Your name</label>
-        <div class="controls">
-            <input id="id_full_name" class="required" type="text" name="full_name"
-                   value="{% if form.full_name.value %}{{ form.full_name.value }}{% endif %}"
-                   maxlength="100" />
-            {% if form.full_name.errors %}
-                {% for error in form.full_name.errors %}
+    {% endif %}
+
+    <form method="post" class="form-horizontal" id="registration" action="{{ url('zerver.views.home.accounts_accept_terms') }}">
+        {{ csrf_input }}
+        <div class="control-group">
+            <label for="id_email" class="control-label">{{ _("Email") }}</label>
+            <div class="controls fakecontrol">
+                <p>{{ email }}</p>
+            </div>
+        </div>
+
+        <div class="control-group">
+            <div class="controls">
+                <label class="checkbox">
+                    {#
+                    This is somewhat subtle.
+                    Checkboxes have a name and value, and when the checkbox is ticked, the form posts
+                    with name=value. If the checkbox is unticked, the field just isn't present at all.
+
+                    This is distinct from 'checked', which determines whether the checkbox appears
+                    at all. (So, it's not symmetric to the code above.)
+                    #}
+                    <input id="id_terms" class="required" type="checkbox" name="terms"
+                           {% if form.terms.value() %}checked="checked"{% endif %} />
+                    {% trans %}I agree to the <a href="{{ server_uri }}/terms">Terms of Service</a>.{% endtrans %}
+                </label>
+                {% if form.terms.errors %}
+                    {% for error in form.terms.errors %}
                     <div class="alert alert-error">{{ error }}</div>
-                {% endfor %}
-            {% endif %}
+                    {% endfor %}
+                {% endif %}
+            </div>
         </div>
-    </div>
-
-    <div class="control-group">
-        <div class="controls">
-            <label class="checkbox">
-                {% comment %}
-                This is somewhat subtle.
-                Checkboxes have a name and value, and when the checkbox is ticked, the form posts
-                with name=value. If the checkbox is unticked, the field just isn't present at all.
-
-                This is distinct from 'checked', which determines whether the checkbox appears
-                at all. (So, it's not symmetric to the code above.)
-                {% endcomment %}
-                <input id="id_terms" class="required" type="checkbox" name="terms"
-                       {% if form.terms.value %}checked="checked"{% endif %} />
-                I agree to the <a href="/terms">Terms of Service</a>.
-            </label>
-            {% if form.terms.errors %}
-                {% for error in form.terms.errors %}
-                    <div class="alert alert-error">{{ error }}</div>
-                {% endfor %}
-            {% endif %}
+        <br />
+        <div class="control-group">
+            <div class="controls">
+                <input type="submit" class="btn btn-primary" value="{{ _('Enter') }}" /><br />
+                <input type="hidden" name="next" value="{{ next }}" />
+            </div>
         </div>
-    </div>
-    <br />
-    <div class="control-group">
-        <div class="controls">
-            <input type="submit" class="btn btn-primary" value="Register" /><br />
-            <input type="hidden" name="next" value="{{ next }}" />
-        </div>
-    </div>
-</form>
-
-<script type="text/javascript">
-autofocus('#id_full_name');
-</script>
+    </form>
 
 {% endblock %}

@@ -1,0 +1,89 @@
+<div id="organization-settings" data-name="organization-settings" class="settings-section">
+    <form class="form-horizontal admin-realm-form org-settings-form">
+        <h3 class="light">{{t "Organization settings" }}</h3>
+
+        <div class="alert" id="admin-realm-name-status"></div>
+        <div class="alert" id="admin-realm-description-status"></div>
+        <div class="alert" id="admin-realm-notifications-stream-status"></div>
+        <div class="alert" id="admin-realm-default-language-status"></div>
+        <div class="alert" id="admin-realm-waiting-period-threshold-status"></div>
+
+        <div class="m-10 inline-block organization-settings-parent">
+            <div class="input-group admin-realm">
+                <label for="id_realm_name">{{t "Your organization's name" }}</label>
+                <input type="text" id="id_realm_name" name="realm_name" class="admin-realm-name"
+                       value="{{ realm_name }}" />
+            </div>
+            <div class="input-group admin-realm">
+                <label for="realm_description">{{t "Your organization's description" }}</label>
+                <textarea id="id_realm_description" name="realm_description" class="admin-realm-description"
+                    maxlength="1000">{{ realm_description }}</textarea>
+            </div>
+            <div class="input-group">
+                <label for="realm_default_language">{{t "Default language" }}:</label>
+                <select name="realm_default_language" id="id_realm_default_language">
+                    {{#each language_list}}
+                    <option value='{{this.code}}'>{{this.name}}</option>
+                    {{/each}}
+                </select>
+            </div>
+            <div class="input-group">
+                <label for="id_realm_waiting_period_threshold">{{t "Waiting period for stream creation (in days)" }}</label>
+                <input type="text" id="id_realm_waiting_period_threshold"
+                     name="realm_waiting_period_threshold"
+                     class="admin-realm-message-content-edit-limit-minutes"
+                     value="{{ realm_waiting_period_threshold }}"/>
+            </div>
+            {{#if is_admin }}
+            <div class="input-group organization-submission">
+                <button type="submit" class="button rounded sea-green">
+                    {{t 'Save changes' }}
+                </button>
+            </div>
+            {{/if}}
+        </div>
+
+        <div class="input-group">
+            <label for="realm_notifications_stream" id="realm_notifications_stream_label" class="inline-block"
+                title="{{t 'The stream to which new stream notifications go to.' }}">
+                {{t "Notifications stream:" }}
+                <button type="button" class="button small rounded">
+                    <span class="dropup actual-dropdown-menu" id="id_realm_notifications_stream"
+                        name="realm_notifications_stream" aria-labelledby="realm_notifications_stream_label">
+                        <a class="dropdown-toggle no-underline" data-toggle="dropdown">
+                            <span id="realm_notifications_stream_name"></span>
+                            <i class="fa fa-pencil"></i>
+                        </a>
+                        <ul class="dropdown-menu" role="menu">
+                            <li class="dropdown-search" role="presentation">
+                                <input type="text" role="menuitem" placeholder="{{t 'Filter streams' }}" autofocus/>
+                            </li>
+                            <span class="dropdown-list-body"></span>
+                        </ul>
+                    </span>
+                </button>
+            </label>
+            {{#if is_admin }}
+            <a class="notifications-stream-disable">{{t "[Disable]" }}</a>
+            {{/if}}
+        </div>
+
+        <h3 class="light">{{t "Organization avatar" }}</h3>
+
+        <div class="realm-icon-section">
+            <div class="inline-block">
+                <img id="realm-settings-icon" src="{{ realm_icon_url }}"/>
+                <div id="realm_icon_file_input_error" class="text-error"></div>
+                <input type="file" name="realm_icon_file_input" class="notvisible"
+                       id="realm_icon_file_input" value="{{t 'Upload icon' }}"/>
+                <div id="upload_icon_spinner"></div>
+            </div>
+            <div class="inline-block avatar-controls">
+                <button class="button rounded sea-green w-200 block input-size"
+                        id="realm_icon_upload_button">{{t 'Upload new icon' }}</button>
+                <button class="button rounded btn-danger w-200 m-t-10 block input-size"
+                        id="realm_icon_delete_button">{{t 'Delete icon' }}</button>
+            </div>
+        </div>
+    </form>
+</div>

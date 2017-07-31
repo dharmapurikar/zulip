@@ -152,7 +152,7 @@ function report_error(msg, stack, opts) {
                 // invoked).  In any case, it will pretty clear that
                 // something is wrong with the page and the user will
                 // probably try to reload anyway.
-                ui.report_message("Oops.  It seems something has gone wrong. " +
+                ui_report.message("Oops.  It seems something has gone wrong. " +
                                   "The error has been reported to the fine " +
                                   "folks at Zulip, but, in the mean time, " +
                                   "please try reloading the page.",
@@ -161,14 +161,14 @@ function report_error(msg, stack, opts) {
         },
         error: function () {
             if (opts.show_ui_msg && ui !== undefined) {
-                ui.report_message("Oops.  It seems something has gone wrong. " +
+                ui_report.message("Oops.  It seems something has gone wrong. " +
                                   "Please try reloading the page.",
                                   $("#home-error"), "alert-error");
             }
         }
     });
 
-    if (page_params.staging) {
+    if (page_params.save_stacktraces) {
         // Save the stacktrace so it can be examined even in
         // development servers.  (N.B. This assumes you have set DEBUG
         // = False on your development server, or else this code path
@@ -383,6 +383,7 @@ exports.warn = function blueslip_warn (msg, more_info) {
 
 exports.error = function blueslip_error (msg, more_info, stack) {
     if (page_params.debug_mode) {
+        console.log(stack);
         throw new BlueslipError(msg, more_info);
     } else {
         if (stack === undefined) {
@@ -402,5 +403,30 @@ exports.fatal = function blueslip_fatal (msg, more_info) {
     throw new BlueslipError(msg, more_info);
 };
 
+// Produces an easy-to-read preview on an HTML element.  Currently
+// only used for including in error report emails; be sure to discuss
+// with other developers before using it in a user-facing context
+// because it is not XSS-safe.
+exports.preview_node = function (node) {
+    if (node.constructor === jQuery) {
+        node = node[0];
+    }
+
+    var tag = node.tagName.toLowerCase();
+    var className = node.className.length ? node.className : false;
+    var id = node.id.length ? node.id : false;
+
+    var node_preview = "<" + tag +
+       (id ? " id='" + id + "'" : "") +
+       (className ? " class='" + className + "'" : "") +
+       "></" + tag + ">";
+
+      return node_preview;
+};
+
 return exports;
 }());
+
+if (typeof module !== 'undefined') {
+    module.exports = blueslip;
+}

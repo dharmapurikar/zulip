@@ -1,0 +1,25 @@
+#!/bin/bash
+
+source tools/travis/activate-venv
+
+set -e
+set -x
+
+./tools/lint --pep8 # Include the slow and thus non-default pep8 linter check
+python manage.py makemessages --locale en
+python -W ignore tools/check-capitalization --no-generate
+python -W ignore tools/check-frontend-i18n --no-generate
+
+./tools/test-tools
+./tools/test-backend --coverage
+./tools/test-migrations
+./tools/optimize-svg
+./tools/test-documentation
+./tools/test-help-documentation.py
+./tools/test-api
+#./tools/test-run-dev  # Disabled in CI because flaky.
+#./tools/test-queue-worker-reload  # Disabled in CI because flaky.
+
+# NB: Everything here should be in `tools/test-all`.  If there's a
+# reason not to run it there, it should be there as a comment
+# explaining why.

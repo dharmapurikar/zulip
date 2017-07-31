@@ -3,9 +3,7 @@ var channel = (function () {
 var exports = {};
 var pending_requests = [];
 
-function add_pending_request (jqXHR) {
-    if (!feature_flags.cleanup_before_reload) { return; }
-
+function add_pending_request(jqXHR) {
     pending_requests.push(jqXHR);
     if (pending_requests.length > 50) {
         blueslip.warn('The length of pending_requests is over 50. Most likely ' +
@@ -13,11 +11,9 @@ function add_pending_request (jqXHR) {
     }
 }
 
-function remove_pending_request (jqXHR) {
-    if (!feature_flags.cleanup_before_reload) { return; }
-
+function remove_pending_request(jqXHR) {
     var pending_request_index = _.indexOf(pending_requests, jqXHR);
-    if (pending_request_index !== -1){
+    if (pending_request_index !== -1) {
         pending_requests.splice(pending_request_index, 1);
     }
 }
@@ -34,8 +30,11 @@ function call(args, idempotent) {
 
         if (xhr.status === 403) {
             try {
-                if ($.parseJSON(xhr.responseText).msg.indexOf("CSRF Error:") !== -1) {
-                    reload.initiate({immediate: true});
+                if (JSON.parse(xhr.responseText).code === 'CSRF_FAILED') {
+                    reload.initiate({immediate: true,
+                                     save_pointer: true,
+                                     save_narrow: true,
+                                     save_compose: true});
                 }
             } catch (ex) {
                 blueslip.error('Unexpected 403 response from server',
@@ -69,12 +68,6 @@ function call(args, idempotent) {
     add_pending_request(jqXHR);
     return jqXHR;
 }
-
-exports.abort_all = function () {
-    _.each(pending_requests, function (jqXHR) {
-        jqXHR.abort();
-    });
-};
 
 exports.get = function (options) {
     var args = _.extend({type: "GET", dataType: "json"}, options);
@@ -114,7 +107,7 @@ exports.xhr_error_message = function (message, xhr) {
     if (xhr.status.toString().charAt(0) === "4") {
         // Only display the error response for 4XX, where we've crafted
         // a nice response.
-        message += ": " + $.parseJSON(xhr.responseText).msg;
+        message += ": " + JSON.parse(xhr.responseText).msg;
     }
     return message;
 };
@@ -122,3 +115,7 @@ exports.xhr_error_message = function (message, xhr) {
 return exports;
 
 }());
+
+if (typeof module !== 'undefined') {
+    module.exports = channel;
+}

@@ -51,8 +51,6 @@
  */
 ;(function($) {
 
-  jQuery.event.props.push("dataTransfer");
-
   var default_opts = {
       fallback_id: '',
       url: '',
@@ -113,6 +111,11 @@
     });
 
     function drop(e) {
+      if (!e.originalEvent.dataTransfer) {
+        return;
+      }
+
+      files = e.originalEvent.dataTransfer.files;
 
       function has_type(dom_stringlist, type) {
         var j;
@@ -124,19 +127,18 @@
         return false;
       }
 
-      if (e.dataTransfer.files.length === 0) {
+      if (files.length === 0) {
         var i;
         for (i = 0; i < opts.raw_droppable.length; i++) {
           var type = opts.raw_droppable[i];
-          if (has_type(e.dataTransfer.types, type)) {
-            opts.rawDrop(e.dataTransfer.getData(type));
+          if (has_type(e.originalEvent.dataTransfer.types, type)) {
+            opts.rawDrop(e.originalEvent.dataTransfer.getData(type));
             return false;
           }
         }
       }
 
       if( opts.drop.call(this, e) === false ) return false;
-      files = e.dataTransfer.files;
       if (files === null || files === undefined || files.length === 0) {
         opts.error(errors[0]);
         return false;
@@ -234,7 +236,7 @@
       builder += boundary;
       builder += crlf;
       builder += 'Content-Disposition: form-data; name="' + opts.paramname + '"';
-      builder += '; filename="' + filename + '"';
+      builder += '; filename="' + encodeURIComponent(filename) + '"';
       builder += crlf;
 
       builder += 'Content-Type: ' + mime;
@@ -339,7 +341,7 @@
 
         if (xhr.responseText) {
           try {
-            serverResponse = jQuery.parseJSON(xhr.responseText);
+            serverResponse = JSON.parse(xhr.responseText);
           }
           catch (e) {
             serverResponse = xhr.responseText;
@@ -360,7 +362,12 @@
 
         // Pass any errors to the error option
         if (xhr.status < 200 || xhr.status > 299) {
-          on_error(xhr.statusText, xhr.status);
+          if (this.responseText.includes("Upload would exceed your maximum quota.")) {
+              var errorString = "QuotaExceeded";
+            on_error(errorString, xhr.status);
+          } else {
+            on_error(xhr.statusText, xhr.status);
+        }
         }
       };
 

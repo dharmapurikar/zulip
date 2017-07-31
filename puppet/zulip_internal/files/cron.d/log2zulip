@@ -1,3 +1,0 @@
-MAILTO=root
-
-* * * * *   zulip cd /home/zulip/deployments/current && ./bots/log2zulip

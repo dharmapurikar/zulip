@@ -1,186 +1,167 @@
 #!/usr/bin/env python
-import os
+from __future__ import absolute_import
+from __future__ import print_function
+from lib.template_parser import validate
+from lib.html_branches import build_id_dict
+from lib.pretty_print import validate_indent_html
+import argparse
 import sys
-import subprocess
+import logging
 
-class Record:
-    pass
+from six.moves import filter
 
-def validate(fn, check_indent=True):
-    text = open(fn).read()
+# check for the venv
+from lib import sanity_check
+sanity_check.check_venv(__file__)
 
-    state = Record()
+import lister
+from typing import cast, Callable, Dict, Iterable, List
 
-    def NoStartTag(end_tag):
-        raise Exception('''
-            No start tag
-            fn: %s
-            end tag:
-                %s
-                line %d, col %d
-            ''' % (fn, end_tag, state.line, state.col))
+EXCLUDED_FILES = [
+    ## Test data Files for testing modules in tests
+    "tools/tests/test_template_data",
+]
 
-    def start_tag_matcher(s, start_tag):
-        start_line = state.line
-        start_col = state.col
-        state.depth += 1
+def check_our_files(modified_only, all_dups, targets):
+    # type: (bool, bool, List[str]) -> None
+    by_lang = cast(
+        Dict[str, List[str]],
+        lister.list_files(
+            targets=targets,
+            modified_only=args.modified,
+            ftypes=['handlebars', 'html'],
+            group_by_ftype=True, exclude=EXCLUDED_FILES))
 
-        old_matcher = state.matcher
-        def f(end_tag):
-            problem = None
-            if start_tag != end_tag:
-                problem = 'Mismatched tag.'
-            elif check_indent and state.line > start_line + 1 and state.col != start_col:
-                problem = 'Bad indentation.'
-            if problem:
-                raise Exception('''
-                    fn: %s
-                    %s
-                    start:
-                        %s
-                        line %d, col %d
-                    end tag:
-                        %s
-                        line %d, col %d
-                    ''' % (fn, problem, s, start_line, start_col, end_tag, state.line, state.col))
-            state.matcher = old_matcher
-            state.depth -= 1
-        state.matcher = f
+    check_handlebar_templates(by_lang['handlebars'])
+    check_html_templates(by_lang['html'], args.all_dups)
 
-    state.depth = 0
-    state.i = 0
-    state.line = 1
-    state.col = 1
-    state.matcher = NoStartTag
+def check_html_templates(templates, all_dups):
+    # type: (Iterable[str], bool) -> None
+    # Our files with .html extensions are usually for Django, but we also
+    # have a few static .html files.
+    #
+    # We also have .html files that we vendored from Casper.
+    # The casperjs files use HTML5 (whereas Zulip prefers XHTML), and
+    # there are also cases where Casper deliberately uses invalid HTML,
+    # so we exclude them from our linter.
+    logging.basicConfig(format='%(levelname)s:%(message)s')
+    templates = filter(
+        lambda fn: ('casperjs' not in fn),
+        templates)
+    templates = sorted(list(templates))
 
-    def advance(n):
-        for _ in range(n):
-            state.i += 1
-            if state.i >= 0 and text[state.i - 1] == '\n':
-                state.line += 1
-                state.col = 1
-            else:
-                state.col += 1
-
-    def looking_at(s):
-        return text[state.i:state.i+len(s)] == s
-
-    while state.i < len(text):
-
-        # HTML tags
-        if looking_at("<") and not looking_at("</"):
-            s = get_html_tag(text, state.i)
-            tag = s[1:-1].split()[0]
-            ignore = s.startswith('<!--') or s.endswith('/>') or tag in ['meta', '!DOCTYPE']
-            if not ignore:
-                start_tag_matcher(s, tag)
-            advance(len(s))
-            continue
-
-        if looking_at("</"):
-            s = get_html_tag(text, state.i)
-            end_tag = s[2:-1]
-            state.matcher(end_tag)
-            advance(len(s))
-            continue
-
-        # Handlebar tags
-        if looking_at("{{#") or looking_at("{{^"):
-            s = get_handlebars_tag(text, state.i)
-            tag = s[3:-2].split()[0]
-            start_tag_matcher(s, tag)
-            advance(len(s))
-            continue
-
-        if looking_at("{{/"):
-            s = get_handlebars_tag(text, state.i)
-            end_tag = s[3:-2]
-            state.matcher(end_tag)
-            advance(len(s))
-            continue
-
-        # Django tags
-        if looking_at("{% ") and not looking_at("{% end"):
-            s = get_django_tag(text, state.i)
-            tag = s[3:-2].split()[0]
-            if is_django_block_tag(tag):
-                start_tag_matcher(s, tag)
-            advance(len(s))
-            continue
-
-        if looking_at("{% end"):
-            s = get_django_tag(text, state.i)
-            end_tag = s[6:-3]
-            state.matcher(end_tag)
-            advance(len(s))
-            continue
-
-        advance(1)
-
-    if state.depth != 0:
-        return state.matcher("(NO TAG)")
-
-def is_django_block_tag(tag):
-    return tag in [
-        'autoescape',
-        'block',
-        'comment',
-        'for',
-        'if',
-        'ifequal',
-        'verbatim',
+    template_id_dict = build_id_dict(templates)
+    # TODO: Clean up these cases of duplicate ids in the code
+    IGNORE_IDS = [
+        'api-example-tabs',
+        'errors',
+        'email',
+        'messages',
+        'registration',
+        'pw_strength',
+        'id_password',
+        'top_navbar',
+        'id_email',
+        'id_terms',
+        'send_confirm',
+        'register',
     ]
+    bad_ids_dict = {ids: fns for ids, fns in template_id_dict.items()
+                    if (ids not in IGNORE_IDS) and len(fns) > 1}
 
-def get_handlebars_tag(text, i):
-    end = i + 2
-    while end < len(text) -1 and text[end] != '}':
-        end += 1
-    if text[end] != '}' or text[end+1] != '}':
-        raise Exception('Tag missing }}')
-    s = text[i:end+2]
-    return s
+    if all_dups:
+        ignorable_ids_dict = {ids: fns for ids, fns in template_id_dict.items()
+                              if ids in IGNORE_IDS and len(fns) > 1}
 
-def get_django_tag(text, i):
-    end = i + 2
-    while end < len(text) -1 and text[end] != '%':
-        end += 1
-    if text[end] != '%' or text[end+1] != '}':
-        raise Exception('Tag missing %}')
-    s = text[i:end+2]
-    return s
+        for ids, fns in ignorable_ids_dict.items():
+            logging.warning("Duplicate ID(s) detected :Id '" + ids +
+                            "' present at following files:")
+            for fn in fns:
+                print(fn)
 
-def get_html_tag(text, i):
-    end = i + 1
-    while end < len(text) and text[end] != '>':
-        end += 1
-    if text[end] != '>':
-        raise Exception('Tag missing >')
-    s = text[i:end+1]
-    return s
+    for ids, fns in bad_ids_dict.items():
+        logging.error("Duplicate ID(s) detected :Id '" + ids +
+                      "' present at following files:")
+        for fn in fns:
+            print(fn)
 
-def check_our_files():
-    git_files = map(str.strip, subprocess.check_output(['git', 'ls-files']).split('\n'))
+    if list(bad_ids_dict.keys()):
+        print('Exiting--please clean up all duplicates before running this again.')
+        sys.exit(1)
 
+    for fn in templates:
+        # Many of our Django templates have strange indentation.  The
+        # indentation errors are often harmless, even stylistically
+        # harmless, but they tend to be in files that might be old
+        # and might eventually require more scrutiny for things like
+        # localization.  See github #1236.
+        bad_files = [
+            'static/html/5xx.html',
+            'templates/corporate/zephyr-mirror.html',
+            'templates/zerver/api.html',
+            'templates/zerver/api_endpoints.html',
+            'templates/zerver/apps.html',
+            'templates/zerver/features.html',
+            'templates/zerver/hello.html',
+            'templates/zerver/home.html',
+            'templates/zerver/integrations/index.html',
+            'templates/zerver/login.html',
+            'templates/zerver/markdown_help.html',
+            'templates/zerver/register.html',
+            'templates/zerver/search_operators.html',
+            'zerver/webhooks/taiga/doc.html',
+            'zerver/webhooks/zendesk/doc.html',
+        ]
+        validate(fn=fn, check_indent=(fn not in bad_files))
+
+    # Ignore these files since these have not been cleaned yet :/
+    IGNORE_FILES = [
+        'puppet/zulip_ops/files/sparkle/mac/sparkle-changelog.html',
+        'puppet/zulip_ops/files/sparkle/sso/mac/sparkle-changelog.html',
+        'puppet/zulip_ops/files/sparkle/sso/win/sparkle-changelog.html',
+        'puppet/zulip_ops/files/sparkle/win/sparkle-changelog.html',
+        'static/html/5xx.html',
+        'templates/analytics/activity.html',
+        'templates/analytics/stats.html',
+        'templates/corporate/zephyr-mirror.html',
+        'templates/zerver/api.html',
+        'templates/zerver/apps.html',
+        'templates/zerver/compose.html',
+        'templates/zerver/hello.html',
+        'templates/zerver/home.html',
+        'templates/zerver/index.html',
+        'templates/zerver/keyboard_shortcuts.html',
+        'templates/zerver/login.html',
+        'templates/zerver/markdown_help.html',
+        'templates/zerver/navbar.html',
+        'zerver/webhooks/stripe/doc.html',
+        'zerver/webhooks/wordpress/doc.html',
+    ]
+    # TODO: Clean these files
+    for fn in templates:
+        if fn not in IGNORE_FILES:
+            if not validate_indent_html(fn):
+                sys.exit(1)
+
+def check_handlebar_templates(templates):
+    # type: (Iterable[str]) -> None
     # Check all our handlebars templates.
-    templates = [fn for fn in git_files if fn.endswith('.handlebars')]
-    assert len(templates) >= 10 # sanity check that we are actually doing work
+    templates = [fn for fn in templates if fn.endswith('.handlebars')]
     for fn in templates:
-        validate(fn)
+        validate(fn=fn, check_indent=True)
 
-    # Django templates are pretty messy now, so we do minimal checking.
-    templates = sorted([fn for fn in git_files if fn.endswith('.html') and 'templates' in fn])
-
-    def ok(fn):
-        if 'api.html' in fn: return False
-        if 'base.html' in fn: return False
-        return True
-
-    templates = filter(ok, templates)
-
-
-    assert len(templates) >= 10 # sanity check that we are actually doing work
     for fn in templates:
-        validate(fn, check_indent=False)
+        if not validate_indent_html(fn):
+            sys.exit(1)
 
 if __name__ == '__main__':
-    check_our_files()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-m', '--modified',
+                        action='store_true', default=False,
+                        help='only check modified files')
+    parser.add_argument('--all-dups',
+                        action="store_true", default=False,
+                        help='Run lint tool to detect duplicate ids on ignored files as well')
+    parser.add_argument('targets', nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    check_our_files(args.modified, args.all_dups, args.targets)

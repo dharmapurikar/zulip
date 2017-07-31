@@ -1,43 +1,61 @@
 from __future__ import absolute_import
 from django.conf import settings
 
-import hashlib
-from zerver.lib.utils import make_safe_digest
+if False:
+    from zerver.models import UserProfile
 
-def gravatar_hash(email):
-    """Compute the Gravatar hash for an email address."""
-    # Non-ASCII characters aren't permitted by the currently active e-mail
-    # RFCs. However, the IETF has published https://tools.ietf.org/html/rfc4952,
-    # outlining internationalization of email addresses, and regardless if we
-    # typo an address or someone manages to give us a non-ASCII address, let's
-    # not error out on it.
-    return make_safe_digest(email.lower(), hashlib.md5)
+from typing import Any, Dict, Optional, Text
 
-def user_avatar_hash(email):
-    # Salting the user_key may be overkill, but it prevents us from
-    # basically mimicking Gravatar's hashing scheme, which could lead
-    # to some abuse scenarios like folks using us as a free Gravatar
-    # replacement.
-    user_key = email.lower() + settings.AVATAR_SALT
-    return make_safe_digest(user_key, hashlib.sha1)
+from zerver.lib.avatar_hash import gravatar_hash, user_avatar_path_from_ids
+from zerver.lib.upload import upload_backend, MEDIUM_AVATAR_SIZE
+from six.moves import urllib
 
-def avatar_url(user_profile):
-    return get_avatar_url(
-            user_profile.avatar_source,
-            user_profile.email
-    )
+def avatar_url(user_profile, medium=False):
+    # type: (UserProfile, bool) -> Text
+    return avatar_url_from_dict(
+        dict(
+            avatar_source=user_profile.avatar_source,
+            avatar_version=user_profile.avatar_version,
+            email=user_profile.email,
+            id=user_profile.id,
+            realm_id=user_profile.realm_id),
+        medium=medium)
 
-def get_avatar_url(avatar_source, email):
-    if avatar_source == 'U':
-        hash_key = user_avatar_hash(email)
-        if settings.LOCAL_UPLOADS_DIR is not None:
-            # ?x=x allows templates to append additional parameters with &s
-            return "/user_avatars/%s.png?x=x" % (hash_key)
-        else:
-            bucket = settings.S3_AVATAR_BUCKET
-            return "https://%s.s3.amazonaws.com/%s?x=x" % (bucket, hash_key)
-    elif settings.ENABLE_GRAVATAR:
+def avatar_url_from_dict(userdict, medium=False):
+    # type: (Dict[str, Any], bool) -> Text
+    url = _get_unversioned_avatar_url(
+        userdict['id'],
+        userdict['avatar_source'],
+        userdict['realm_id'],
+        email=userdict['email'],
+        medium=medium)
+    url += '&version=%d' % (userdict['avatar_version'],)
+    return url
+
+def get_gravatar_url(email, avatar_version, medium=False):
+    # type: (Text, int, bool) -> Text
+    url = _get_unversioned_gravatar_url(email, medium)
+    url += '&version=%d' % (avatar_version,)
+    return url
+
+def _get_unversioned_gravatar_url(email, medium):
+    # type: (Text, bool) -> Text
+    if settings.ENABLE_GRAVATAR:
+        gravitar_query_suffix = "&s=%s" % (MEDIUM_AVATAR_SIZE,) if medium else ""
         hash_key = gravatar_hash(email)
-        return "https://secure.gravatar.com/avatar/%s?d=identicon" % (hash_key,)
-    else:
-        return settings.DEFAULT_AVATAR_URI+'?x=x'
+        return u"https://secure.gravatar.com/avatar/%s?d=identicon%s" % (hash_key, gravitar_query_suffix)
+    return settings.DEFAULT_AVATAR_URI+'?x=x'
+
+def _get_unversioned_avatar_url(user_profile_id, avatar_source, realm_id, email=None, medium=False):
+    # type: (int, Text, int, Optional[Text], bool) -> Text
+    if avatar_source == u'U':
+        hash_key = user_avatar_path_from_ids(user_profile_id, realm_id)
+        return upload_backend.get_avatar_url(hash_key, medium=medium)
+    assert email is not None
+    return _get_unversioned_gravatar_url(email, medium)
+
+def absolute_avatar_url(user_profile):
+    # type: (UserProfile) -> Text
+    """Absolute URLs are used to simplify logic for applications that
+    won't be served by browsers, such as rendering GCM notifications."""
+    return urllib.parse.urljoin(user_profile.realm.uri, avatar_url(user_profile))

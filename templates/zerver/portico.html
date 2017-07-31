@@ -1,77 +1,61 @@
 {% extends "zerver/base.html" %}
 
-{% load compressed %}
+{# A base template for stuff like login, register, etc.
 
-{% comment %}
-A base template for stuff like login, register, etc.
+    Not inside the app itself, but covered by the same structure,
+    hence the name.
+#}
 
-Not inside the app itself, but covered by the same structure,
-hence the name.
-{% endcomment %}
-
-    {% block customhead %}
-    {% compressed_css 'portico' %}
-    {% endblock %}
+{% block customhead %}
+{% stylesheet 'portico' %}
+{% endblock %}
 
 {% block content %}
-<div class="header">
-<div class="header-main" id="top_navbar">
-  <div class="column-left">
-        <div>
-          {% if zulip_com %}
-          <a class="brand logo" href="/"><img src="/static/images/logo/zulip-dropbox.png" class="portico-logo" alt="Zulip" content="Zulip" /></a>
-          {% else %}
-          <a class="brand logo" href="/"><img src="/static/images/logo/zulipcornerlogo@2x.png" class="portico-simple-logo" alt="Zulip" content="Zulip" /></a>
-          {% endif %}
+<div class="portico-container">
+    <div class="portico-wrap">
+        <div class="header">
+            <div class="header-main" id="top_navbar">
+                <div class="column-left">
+                    <div>
+                        {% if custom_logo_url %}
+                        <a class="brand logo" href="{{ server_uri }}/"><img draggable="false" src="{{ custom_logo_url }}" class="portico-logo" alt="{{ _('Zulip') }}" content="Zulip" /></a>
+                        {% else %}
+                        <a class="brand logo" href="{{ server_uri }}">
+                            <svg class="brand-logo" xmlns:svg="http://www.w3.org/2000/svg" xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 40 40" version="1.1">
+                                <g transform="translate(-297.14285,-466.64792)">
+                                    <circle cx="317.14285" cy="486.64792" r="19.030317" style="fill:#fff;stroke-width:1.93936479;stroke:transparent"></circle>
+                                    <path d="m309.24286 477.14791 14.2 0 1.6 3.9-11.2 11.9 9.6 0 1.6 3.2-14.2 0-1.6-3.9 11.2-11.9-9.6 0z" style="fill:#52c2af;stroke:#52c2af"></path>
+                                </g>
+                            </svg>
+                            <span>Zulip</span>
+                        </a>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <div class="column-right top-links">
+                    {% if login_link_disabled %}
+                    {% elif not only_sso %}
+                    <a href="{{login_url}}">{{ _('Log in') }}</a>
+                    {% endif %}
+
+                    {% if register_link_disabled %}
+                    {% elif only_sso %}
+                    <a href="{{ url('login-sso') }}">{{ _('Log in') }}</a>
+                    {% else %}
+                    <a href="{{ url('register') }}">{{ _('Register') }}</a>
+                    {% endif %}
+                </div>
+            </div>
         </div>
-  </div>
 
-  <div class="column-right top-links">
-          {% if not only_sso %}
-          <a href="{{login_url}}">Log in</a>
-          {% endif %}
-
-          {% if only_sso %}
-          <a href="{% url 'login-sso' %}">Log In</a>
-          {% else %}
-          <a href="{% url 'register' %}">Register</a>
-          {% endif %}
-  </div>
-</div>
-</div>
-
-<div class="app portico-page">
-  <div class="portico-os-announcement">
-    {% block os_announcement %}
-    {% endblock %}
-  </div>
-  <div class="app-main portico-page-container{% block hello_page_container %}{% endblock %}">
-  {% block portico_content %}
-  {% endblock %}
-  </div>
-  <div class="footer-padder{% block hello_page_footer %}{% endblock %}"></div>
-</div>
-
-<div class="footer">
-  <div class="footer-main">
-    <ul class="footer-navigation">
-      <li><a href="/hello">About</a></li>
-      {% if zulip_com %}
-      <li><span class="little-bullet">·</span></li>
-      <li><a href="/terms">Legal</a></li>
-      {% endif %}
-      <li><span class="little-bullet">·</span></li>
-      <li><a href="{{login_url}}">Log in</a></li>
-      {% if not only_sso %}
-      <li><span class="little-bullet">·</span></li>
-      <li>
-          {% if zulip_com %}
-          {% else %}
-          <a href="{% url 'register' %}">Register</a>
-          {% endif %}
-      </li>
-      {% endif %}
-    </ul>
-  </div>
+        <div class="app portico-page">
+            <div class="app-main portico-page-container{% block hello_page_container %}{% endblock %}">
+                {% block portico_content %}
+                {% endblock %}
+            </div>
+        </div>
+    </div>
+    {% include 'zerver/footer.html' %}
 </div>
 {% endblock %}

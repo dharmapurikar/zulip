@@ -4,6 +4,9 @@ var exports = {};
 
 exports.words = page_params.alert_words;
 
+// Delete the `page_params.alert_words` since we are its sole user.
+delete page_params.alert_words;
+
 // escape_user_regex taken from jquery-ui/autocomplete.js,
 // licensed under MIT license.
 function escape_user_regex(value) {
@@ -24,25 +27,23 @@ exports.process_message = function (message) {
         var after_punctuation = '\\s|$|<|[\\)\\"\\?!:.,\';\\]!]';
 
 
-        var word_in_href = new RegExp(find_href_backwards + word, 'i');
-
         var regex = new RegExp('(' + before_punctuation + ')' +
                                '(' + clean + ')' +
                                '(' + after_punctuation + ')' , 'ig');
-        message.content = message.content.replace(regex, function (match, before, word, after, offset, content) {
+        message.content = message.content.replace(regex, function (match, before, word,
+                                                                   after, offset, content) {
             // Don't munge URL hrefs
             var pre_match = content.substring(0, offset);
             if (find_href_backwards.exec(pre_match) || find_title_backwards.exec(pre_match)) {
                 return before + word + after;
-            } else {
-                return before + "<span class='alert-word'>" + word + "</span>" + after;
             }
+            return before + "<span class='alert-word'>" + word + "</span>" + after;
         });
     });
 };
 
 exports.notifies = function (message) {
-    return ((message.sender_email !== page_params.email) && message.alerted);
+    return !people.is_current_user(message.sender_email) && message.alerted;
 };
 
 return exports;

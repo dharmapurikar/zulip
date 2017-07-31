@@ -1,8 +1,12 @@
 #!/usr/bin/env python
+from __future__ import print_function
 import sh
 import os
 import re
 import sys
+import subprocess
+
+from typing import Iterable
 
 # Prepare a PDF of the entire codebase, ready for printing.
 #
@@ -24,8 +28,6 @@ import sys
 
 exclude_trees = """
 static/third
-puppet/common
-puppet/puppet-common
 puppet/apt
 puppet/puppet-apt
 certs
@@ -34,7 +36,6 @@ certs
 exclude_files = """
 zilencer/management/commands/test_messages.txt
 tools/usability_testing/humbug_usability_test_data
-tools/jslint/jslint.js
 """.split()
 
 extensions = dict(
@@ -54,7 +55,7 @@ try:
     sh.git('diff-index', '--cached', '--quiet', 'HEAD')
 except sh.ErrorReturnCode:
     sys.stderr.write('Your Git repository is not clean!\n\n')
-    os.system('git status')  # output to terminal
+    subprocess.call(['git', 'status'], stderr=subprocess.STDOUT)  # output to terminal
     sys.exit(1)
 
 with open('tools/print-all/tex/preamble.tex', 'w') as f:
@@ -78,7 +79,7 @@ notfile  = []
 empty    = []
 excluded = []
 
-doc = file('tools/print-all/tex/all_code.tex', 'w')
+doc = open('tools/print-all/tex/all_code.tex', 'w')
 doc.write(r'''
 \input{header}
 \begin{document}
@@ -115,7 +116,7 @@ for fil in sh.git('ls-files', _iter=True):
     if filetype == 'html' and fil.startswith('templates/'):
         filetype = 'html+django'
 
-    print 'Scanning', fil
+    print('Scanning', fil)
     outname = fil.replace('_', '_u_').replace('.', '_d_').replace('/', '_s_')
     sh.pygmentize(
         '-l', (filetype if filetype else 'text'),
@@ -130,8 +131,9 @@ doc.write(r'''
 ''')
 doc.close()
 
-with file('tools/print-all/tex/epilogue.tex', 'w') as f:
+with open('tools/print-all/tex/epilogue.tex', 'w') as f:
     def print_list(title, xs):
+        # type: (str, Iterable[str]) -> None
         f.write('\\section*{%s}\n\n' % (title,))
         for x in xs:
             f.write('%s\n\n' % (x.replace('_', r'\_'),))
@@ -140,8 +142,8 @@ with file('tools/print-all/tex/epilogue.tex', 'w') as f:
     print_list('Not regular files', notfile)
     print_list('Explicitly excluded', excluded)
 
-print
-print 'Rendering...'
+print()
+print('Rendering...')
 os.chdir('tools/print-all/tex')
 
 if not os.path.exists('utf-8.def'):
@@ -155,13 +157,13 @@ try:
     sh.latex('all_code.tex', _in='')
     sh.dvips('all_code.dvi')
 except sh.ErrorReturnCode as exn:
-    print exn.stdout
+    print(exn.stdout)
     sys.exit(1)
 
-print 'Converting to 2-up...'
+print('Converting to 2-up...')
 sh.psnup('-n', '2', 'all_code.ps', _out='all_code_2up.ps')
 sh.pstopdf('all_code_2up.ps')
 
 os.chdir(orig_cwd)
-print
-print sh.file('tools/print-all/tex/all_code_2up.pdf')
+print()
+print(sh.file('tools/print-all/tex/all_code_2up.pdf'))

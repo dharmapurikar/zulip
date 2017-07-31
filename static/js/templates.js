@@ -3,8 +3,14 @@ var templates = (function () {
 var exports = {};
 
 exports.render = function (name, arg) {
-     if (Handlebars.templates === undefined) {
-        throw "Cannot find compiled templates!";
+    if (Handlebars.templates === undefined) {
+        throw new Error("Cannot find compiled templates!");
+    }
+    if (Handlebars.templates[name] === undefined) {
+        throw new Error("Cannot find a template with this name: " + name
+              + ". If you are developing a new feature, this likely "
+              + "means you need to add the file static/templates/"
+              + name + ".handlebars");
     }
 
     // The templates should be compiled into compiled.js.  In
@@ -48,7 +54,7 @@ Handlebars.registerHelper('if_and', function () {
     //     {{/if_and}}
     var options = arguments[arguments.length - 1];
     var i;
-    for (i = 0; i < arguments.length - 1; i++) {
+    for (i = 0; i < arguments.length - 1; i += 1) {
         if (!arguments[i]) {
             return options.inverse(this);
         }
@@ -64,13 +70,41 @@ Handlebars.registerHelper('if_or', function () {
     //     {{/if_or}}
     var options = arguments[arguments.length - 1];
     var i;
-    for (i = 0; i < arguments.length - 1; i++) {
+    for (i = 0; i < arguments.length - 1; i += 1) {
         if (arguments[i]) {
             return options.fn(this);
 
         }
     }
     return options.inverse(this);
+});
+
+Handlebars.registerHelper('t', function (i18n_key) {
+    // Marks a string for translation.
+    // Example usage:
+    //     {{t "some English text"}}
+    var result = i18n.t(i18n_key);
+    return new Handlebars.SafeString(result);
+});
+
+Handlebars.registerHelper('tr', function (context, options) {
+    // Marks a block for translation.
+    // Example usage 1:
+    //     {{#tr context}}
+    //         <p>some English text</p>
+    //     {{/tr}}
+    //
+    // Example usage 2:
+    //     {{#tr context}}
+    //         <p>This __variable__ will get value from context</p>
+    //     {{/tr}}
+    //
+    // Notes:
+    //     1. `context` is very important. It can be `this` or an
+    //        object or key of the current context.
+    //     2. Use `__` instead of `{{` and `}}` to declare expressions
+    var result = i18n.t(options.fn(context), context);
+    return new Handlebars.SafeString(result);
 });
 
 return exports;

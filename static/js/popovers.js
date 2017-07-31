@@ -4,8 +4,55 @@ var exports = {};
 
 var current_actions_popover_elem;
 var current_message_info_popover_elem;
-
 var userlist_placement = "right";
+
+var list_of_popovers = [];
+
+// this utilizes the proxy pattern to intercept all calls to $.fn.popover
+// and push the $.fn.data($o, "popover") results to an array.
+// this is needed so that when we try to unload popovers, we can kill all dead
+// ones that no longer have valid parents in the DOM.
+(function (popover) {
+
+    $.fn.popover = function () {
+        // apply the jQuery object as `this`, and popover function arguments.
+        popover.apply(this, arguments);
+
+        // if there is a valid "popover" key in the jQuery data object then
+        // push it to the array.
+        if (this.data("popover")) {
+            list_of_popovers.push(this.data("popover"));
+        }
+    };
+
+    // add back all shallow properties of $.fn.popover to the new proxied version.
+    for (var x in popover) {
+        if (popover.hasOwnProperty(x)) {
+            $.fn.popover[x] = popover[x];
+        }
+    }
+}($.fn.popover));
+
+function load_medium_avatar(user_email) {
+    var sender_avatar_medium = new Image();
+    sender_avatar_medium.src= "avatar/" + user_email + "/medium";
+    $(sender_avatar_medium).on("load", function () {
+        $(".popover-avatar").css("background-image","url("+$(this).attr("src")+")");
+    });
+}
+
+function user_last_seen_time_status(user_id) {
+    var status = presence.get_status(user_id);
+    if (status === "active") {
+        return i18n.t("Active now");
+    }
+    if (status === "unknown") {
+        // We are not using this anywhere right now as the user presence indicator
+        // is hidden for this case
+        return i18n.t("Unknown");
+    }
+    return timerender.last_seen_status_from_date(presence.last_active_date(user_id).clone());
+}
 
 function show_message_info_popover(element, id) {
     var last_popover_elem = current_message_info_popover_elem;
@@ -23,21 +70,54 @@ function show_message_info_popover(element, id) {
                                      elt.closest(".message_row").find(".message_time"));
 
         var message = current_msg_list.get(id);
+        var sender = people.get_person_from_user_id(message.sender_id);
+        var sender_email;
+
+        if (sender) {
+            sender_email = sender.email;
+        } else {
+            blueslip.debug('Bad sender in message' + message.sender_id);
+            sender_email = message.sender_email;
+        }
+
         var args = {
-            message:  message,
-            pm_with_uri: narrow.pm_with_uri(message.sender_email),
-            sent_by_uri: narrow.by_sender_uri(message.sender_email),
-            narrowed: narrow.active()
+            user_full_name: message.sender_full_name,
+            user_email: sender_email,
+            user_id: message.sender_id,
+            user_time: people.get_user_time(message.sender_id),
+            presence_status: presence.get_status(message.sender_id),
+            user_last_seen_time_status: user_last_seen_time_status(message.sender_id),
+            pm_with_uri: narrow.pm_with_uri(sender_email),
+            sent_by_uri: narrow.by_sender_uri(sender_email),
+            narrowed: narrow_state.active(),
+            historical: message.historical,
+            private_message_class: "respond_personal_button",
         };
 
-        var ypos = elt.offset().top - viewport.scrollTop();
+        var ypos = elt.offset().top;
+        var popover_size = 428;
+        var placement = "right";
+
+        if (!((ypos + (popover_size / 2) < message_viewport.height()) &&
+            (ypos > (popover_size / 2)))) {
+            if (((ypos + popover_size) < message_viewport.height())) {
+                placement = "bottom";
+            } else if (ypos > popover_size) {
+                placement = "top";
+            }
+        }
+
         elt.popover({
-            placement: (ypos > (viewport.height() - 300)) ? 'top' : 'bottom',
-            title:     templates.render('message_info_popover_title',   args),
-            content:   templates.render('message_info_popover_content', args),
-            trigger:   "manual"
+            placement: placement,
+            template:  templates.render('user_info_popover',   {class: "message-info-popover"}),
+            title:     templates.render('user_info_popover_title', {user_avatar: "avatar/" + sender_email}),
+            content:   templates.render('user_info_popover_content', args),
+            trigger:   "manual",
         });
         elt.popover("show");
+
+        load_medium_avatar(sender_email);
+
         current_message_info_popover_elem = elt;
     }
 }
@@ -52,11 +132,24 @@ exports.toggle_actions_popover = function (element, id) {
         return;
     }
 
+    $(element).closest('.message_row').toggleClass('has_popover has_actions_popover');
     current_msg_list.select_id(id);
     var elt = $(element);
     if (elt.data('popover') === undefined) {
         var message = current_msg_list.get(id);
-        var can_edit = message.sent_by_me && message.local_id === undefined && !feature_flags.disable_message_editing;
+        var editability = message_edit.get_editability(message);
+        var use_edit_icon;
+        var editability_menu_item;
+        if (editability === message_edit.editability_types.FULL) {
+            use_edit_icon = true;
+            editability_menu_item = i18n.t("Edit");
+        } else if (editability === message_edit.editability_types.TOPIC_ONLY) {
+            use_edit_icon = false;
+            editability_menu_item = i18n.t("View source / Edit topic");
+        } else {
+            use_edit_icon = false;
+            editability_menu_item = i18n.t("View source");
+        }
         var can_mute_topic =
                 message.stream &&
                 message.subject &&
@@ -66,22 +159,30 @@ exports.toggle_actions_popover = function (element, id) {
                 message.subject &&
                 muting.is_topic_muted(message.stream, message.subject);
 
-
+        var should_display_edit_history_option = _.any(message.edit_history, function (entry) {
+            return entry.prev_content !== undefined;
+        }) && page_params.realm_allow_edit_history;
+        var should_display_delete_option = page_params.is_admin;
         var args = {
-            message:  message,
-            can_edit_message: can_edit,
+            message: message,
+            use_edit_icon: use_edit_icon,
+            editability_menu_item: editability_menu_item,
             can_mute_topic: can_mute_topic,
             can_unmute_topic: can_unmute_topic,
-            conversation_time_uri: narrow.by_conversation_and_time_uri(message),
-            narrowed: narrow.active()
+            should_display_add_reaction_option: message.sent_by_me,
+            should_display_edit_history_option: should_display_edit_history_option,
+            conversation_time_uri: narrow.by_conversation_and_time_uri(message, true),
+            narrowed: narrow_state.active(),
+            should_display_delete_option: should_display_delete_option,
         };
 
-        var ypos = elt.offset().top - viewport.scrollTop();
+        var ypos = elt.offset().top;
         elt.popover({
-            placement: (ypos > (viewport.height() - 300)) ? 'top' : 'bottom',
+            // Popover height with 7 items in it is ~190 px
+            placement: ((message_viewport.height() - ypos) < 220) ? 'top' : 'bottom',
             title:     "",
             content:   templates.render('actions_popover_content', args),
-            trigger:   "manual"
+            trigger:   "manual",
         });
         elt.popover("show");
         current_actions_popover_elem = elt;
@@ -89,13 +190,28 @@ exports.toggle_actions_popover = function (element, id) {
 };
 
 function get_action_menu_menu_items() {
-    return $('li:not(.divider):visible a', current_actions_popover_elem.data('popover').$tip);
+    if (!current_actions_popover_elem) {
+        blueslip.error('Trying to get menu items when action popover is closed.');
+        return;
+    }
+
+    var popover_data = current_actions_popover_elem.data('popover');
+    if (!popover_data) {
+        blueslip.error('Cannot find popover data for actions menu.');
+        return;
+    }
+
+    return $('li:not(.divider):visible a', popover_data.$tip);
 }
 
 function focus_first_action_popover_item() {
     // For now I recommend only calling this when the user opens the menu with a hotkey.
     // Our popup menus act kind of funny when you mix keyboard and mouse.
     var items = get_action_menu_menu_items();
+    if (!items) {
+        return;
+    }
+
     items.eq(0).expectOne().focus();
 }
 
@@ -110,6 +226,10 @@ exports.open_message_menu = function () {
 
 exports.actions_menu_handle_keyboard = function (key) {
     var items = get_action_menu_menu_items();
+    if (!items) {
+        return;
+    }
+
     var index = items.index(items.filter(':focus'));
 
     if (key === "enter" && index >= 0 && index < items.length) {
@@ -117,12 +237,10 @@ exports.actions_menu_handle_keyboard = function (key) {
     }
     if (index === -1) {
         index = 0;
-    }
-    else if ((key === 'down_arrow' || key === 'vim_down') && index < items.length - 1) {
-        ++index;
-    }
-    else if ((key === 'up_arrow' || key === 'vim_up') && index > 0) {
-        --index;
+    } else if ((key === 'down_arrow' || key === 'vim_down') && index < items.length - 1) {
+        index += 1;
+    } else if ((key === 'up_arrow' || key === 'vim_up') && index > 0) {
+        index -= 1;
     }
     items.eq(index).focus();
 };
@@ -133,6 +251,7 @@ exports.actions_popped = function () {
 
 exports.hide_actions_popover = function () {
     if (popovers.actions_popped()) {
+        $('.has_popover').removeClass('has_popover has_actions_popover');
         current_actions_popover_elem.popover("destroy");
         current_actions_popover_elem = undefined;
     }
@@ -153,7 +272,7 @@ exports.hide_userlist_sidebar = function () {
     $(".app-main .column-right").removeClass("expanded");
 };
 
-exports.hide_streamlist_sidebar = function () {
+exports.hide_pm_list_sidebar = function () {
     $(".app-main .column-left").removeClass("expanded");
 };
 
@@ -162,55 +281,44 @@ exports.show_userlist_sidebar = function () {
     resize.resize_page_components();
 };
 
-exports.show_streamlist_sidebar = function () {
+exports.show_pm_list_sidebar = function () {
     $(".app-main .column-left").addClass("expanded");
     resize.resize_page_components();
 };
 
-var current_stream_sidebar_elem;
-var current_topic_sidebar_elem;
-var current_user_sidebar_email;
+var current_user_sidebar_user_id;
 var current_user_sidebar_popover;
-
 
 function user_sidebar_popped() {
     return current_user_sidebar_popover !== undefined;
 }
-
-function stream_sidebar_popped() {
-    return current_stream_sidebar_elem !== undefined;
-}
-
-function topic_sidebar_popped() {
-    return current_topic_sidebar_elem !== undefined;
-}
-
-exports.hide_stream_sidebar_popover = function () {
-    if (stream_sidebar_popped()) {
-        $(current_stream_sidebar_elem).popover("destroy");
-        current_stream_sidebar_elem = undefined;
-    }
-};
-
-exports.hide_topic_sidebar_popover = function () {
-    if (topic_sidebar_popped()) {
-        $(current_topic_sidebar_elem).popover("destroy");
-        current_topic_sidebar_elem = undefined;
-    }
-};
 
 exports.hide_user_sidebar_popover = function () {
     if (user_sidebar_popped()) {
         // this hide_* method looks different from all the others since
         // the presence list may be redrawn. Due to funkiness with jquery's .data()
         // this would confuse $.popover("destroy"), which looks at the .data() attached
-        // to a certain element. We thus save off the .data("popover") in the show_user_sidebar_popover
-        // and inject it here before calling destroy.
+        // to a certain element. We thus save off the .data("popover") in the
+        // show_user_sidebar_popover and inject it here before calling destroy.
         $('#user_presences').data("popover", current_user_sidebar_popover);
         $('#user_presences').popover("destroy");
-        current_user_sidebar_email = undefined;
+        current_user_sidebar_user_id = undefined;
         current_user_sidebar_popover = undefined;
     }
+};
+
+exports.show_sender_info = function () {
+    var message = $(".selected_message");
+    var sender = message.find(".sender_info_hover");
+    var prev_message = message.prev();
+    while (!sender[0]) {
+        prev_message = prev_message.prev();
+        if (!prev_message) {
+            break;
+        }
+        sender = prev_message.find(".sender_info_hover");
+    }
+    show_message_info_popover(sender[0], rows.id(message));
 };
 
 exports.register_click_handlers = function () {
@@ -227,28 +335,47 @@ exports.register_click_handlers = function () {
     });
 
     $('body').on('click', '.user_popover .narrow_to_private_messages', function (e) {
-        var email = $(e.target).parents('ul').attr('data-email');
+        var user_id = $(e.target).parents('ul').attr('data-user-id');
+        var email = people.get_person_from_user_id(user_id).email;
+
         popovers.hide_user_sidebar_popover();
         narrow.by('pm-with', email, {select_first_unread: true, trigger: 'user sidebar popover'});
         e.stopPropagation();
     });
 
     $('body').on('click', '.user_popover .narrow_to_messages_sent', function (e) {
-        var email = $(e.target).parents('ul').attr('data-email');
+        var user_id = $(e.target).parents('ul').attr('data-user-id');
+        var email = people.get_person_from_user_id(user_id).email;
+
         popovers.hide_user_sidebar_popover();
         narrow.by('sender', email, {select_first_unread: true, trigger: 'user sidebar popover'});
         e.stopPropagation();
     });
 
     $('body').on('click', '.user_popover .compose_private_message', function (e) {
-        var email = $(e.target).parents('ul').attr('data-email');
+        var user_id = $(e.target).parents('ul').attr('data-user-id');
+        var email = people.get_person_from_user_id(user_id).email;
         popovers.hide_user_sidebar_popover();
-        compose.start('private', {"private_message_recipient": email, trigger: 'sidebar user actions'});
+
+        compose_actions.start('private', {private_message_recipient: email, trigger: 'sidebar user actions'});
         e.stopPropagation();
+        e.preventDefault();
+    });
+
+    $('body').on('click', '.user_popover .mention_user', function (e) {
+        var user_id = $(e.target).parents('ul').attr('data-user-id');
+        compose_actions.start('stream', {trigger: 'sidebar user actions'});
+        var name = people.get_person_from_user_id(user_id).full_name;
+        var textarea = $("#new_message_content");
+        textarea.val('@**' + name + '** ');
+        popovers.hide_user_sidebar_popover();
+        e.stopPropagation();
+        e.preventDefault();
     });
 
     $('body').on('click', '.sender_info_popover .narrow_to_private_messages', function (e) {
-        var email = $(e.target).parents('ul').attr('data-email');
+        var user_id = $(e.target).parents('ul').attr('data-user-id');
+        var email = people.get_person_from_user_id(user_id).email;
         narrow.by('pm-with', email, {select_first_unread: true, trigger: 'user sidebar popover'});
         popovers.hide_message_info_popover();
         e.stopPropagation();
@@ -256,8 +383,20 @@ exports.register_click_handlers = function () {
     });
 
     $('body').on('click', '.sender_info_popover .narrow_to_messages_sent', function (e) {
-        var email = $(e.target).parents('ul').attr('data-email');
+        var user_id = $(e.target).parents('ul').attr('data-user-id');
+        var email = people.get_person_from_user_id(user_id).email;
         narrow.by('sender', email, {select_first_unread: true, trigger: 'user sidebar popover'});
+        popovers.hide_message_info_popover();
+        e.stopPropagation();
+        e.preventDefault();
+    });
+
+    $('body').on('click', '.sender_info_popover .mention_user', function (e) {
+        compose_actions.respond_to_message({trigger: 'user sidebar popover'});
+        var user_id = $(e.target).parents('ul').attr('data-user-id');
+        var name = people.get_person_from_user_id(user_id).full_name;
+        var textarea = $("#new_message_content");
+        textarea.val('@**' + name + '** ');
         popovers.hide_message_info_popover();
         e.stopPropagation();
         e.preventDefault();
@@ -269,10 +408,10 @@ exports.register_click_handlers = function () {
         // use email of currently selected user, rather than some elem comparison,
         // as the presence list may be redrawn with new elements.
         var target = $(this).closest('li');
-        var email = target.find('a').attr('data-email');
+        var user_id = target.find('a').attr('data-user-id');
         var name = target.find('a').attr('data-name');
 
-        if (current_user_sidebar_email === email) {
+        if (current_user_sidebar_user_id === user_id) {
             // If the popover is already shown, clicking again should toggle it.
             popovers.hide_all();
             return;
@@ -282,229 +421,100 @@ exports.register_click_handlers = function () {
         if (userlist_placement === "right") {
             popovers.show_userlist_sidebar();
         }
-        var template_vars = {email: email, name: name};
-        var content = templates.render('user_sidebar_actions', template_vars);
+
+        var user_email = people.get_person_from_user_id(user_id).email;
+
+        var args = {
+            user_email: user_email,
+            user_full_name: name,
+            user_id: user_id,
+            user_time: people.get_user_time(user_id),
+            presence_status: presence.get_status(user_id),
+            user_last_seen_time_status: user_last_seen_time_status(user_id),
+            pm_with_uri: narrow.pm_with_uri(user_email),
+            sent_by_uri: narrow.by_sender_uri(user_email),
+            private_message_class: "compose_private_message",
+        };
 
         target.popover({
-            content:   content,
-            placement: userlist_placement === "left" ? "right" : "left",
+            template:  templates.render('user_info_popover',   {class: "user_popover"}),
+            title:     templates.render('user_info_popover_title', {user_avatar: "avatar/" + user_email}),
+            content:   templates.render('user_info_popover_content', args),
             trigger:   "manual",
-            fixed: true
+            fixed: true,
+            placement: userlist_placement === "left" ? "right" : "left",
         });
         target.popover("show");
-        current_user_sidebar_email = email;
+
+        load_medium_avatar(user_email);
+
+        current_user_sidebar_user_id = user_id;
         current_user_sidebar_popover = target.data('popover');
 
     });
 
-    $('#stream_filters').on('click', '.topic-sidebar-arrow', function (e) {
-        var elt = e.target;
-
-        if (topic_sidebar_popped()
-            && current_topic_sidebar_elem === elt) {
-            // If the popover is already shown, clicking again should toggle it.
-            popovers.hide_topic_sidebar_popover();
-            e.stopPropagation();
-            return;
-        }
-
-        popovers.hide_all();
-        popovers.show_streamlist_sidebar();
-
-        var stream_name = $(elt).closest('.expanded_subjects').expectOne().attr('data-stream');
-        var topic_name = $(elt).closest('li').expectOne().attr('data-name');
-
-        var is_muted = muting.is_topic_muted(stream_name, topic_name);
-        var can_mute_topic = !is_muted;
-        var can_unmute_topic = is_muted;
-
-        var content = templates.render('topic_sidebar_actions', {
-            'stream_name': stream_name,
-            'topic_name': topic_name,
-            'can_mute_topic': can_mute_topic,
-            'can_unmute_topic': can_unmute_topic
-        });
-
-        $(elt).popover({
-            content: content,
-            trigger: "manual",
-            fixed: true
-        });
-
-        $(elt).popover("show");
-
-        current_topic_sidebar_elem = elt;
-        e.stopPropagation();
-    });
-
-    $('body').on('click', '.narrow_to_topic', function (e) {
-        popovers.hide_topic_sidebar_popover();
-
-        var row = $(e.currentTarget).closest('.narrow_to_topic').expectOne();
-        var stream_name = row.attr('data-stream-name');
-        var topic_name = row.attr('data-topic-name');
-
-        var operators = [
-            {operator: 'stream', operand: stream_name},
-            {operator: 'topic', operand: topic_name}
-        ];
-        var opts = {select_first_unread: true, trigger: 'sidebar'};
-        narrow.activate(operators, opts);
-
-        e.stopPropagation();
-    });
-
-    $('body').on('click', '.sidebar-popover-mute-topic', function (e) {
-        var stream = $(e.currentTarget).attr('data-stream-name');
-        var topic = $(e.currentTarget).attr('data-topic-name');
-        popovers.hide_topic_sidebar_popover();
-        muting.mute_topic(stream, topic);
-        muting_ui.persist_and_rerender();
-        e.stopPropagation();
-        e.preventDefault();
-    });
-
-    $('body').on('click', '.sidebar-popover-unmute-topic', function (e) {
-        var stream = $(e.currentTarget).attr('data-stream-name');
-        var topic = $(e.currentTarget).attr('data-topic-name');
-        popovers.hide_topic_sidebar_popover();
-        muting.unmute_topic(stream, topic);
-        muting_ui.persist_and_rerender();
-        e.stopPropagation();
-        e.preventDefault();
-    });
-
-
-    $('#stream_filters').on('click', '.stream-sidebar-arrow', function (e) {
-        var elt = e.target;
-        if (stream_sidebar_popped()
-            && current_stream_sidebar_elem === elt) {
-            // If the popover is already shown, clicking again should toggle it.
-            popovers.hide_stream_sidebar_popover();
-            e.stopPropagation();
-            return;
-        }
-
-        popovers.hide_all();
-        popovers.show_streamlist_sidebar();
-
-        var stream = $(elt).parents('li').attr('data-name');
-
-        var ypos = $(elt).offset().top - viewport.scrollTop();
-        $(elt).popover({
-            content:   templates.render('stream_sidebar_actions', {'stream': stream_data.get_sub(stream)}),
-            trigger:   "manual",
-            fixed: true
-        });
-
-        // This little function is a workaround for the fact that
-        // Bootstrap popovers don't properly handle being resized --
-        // so after resizing our popover to add in the spectrum color
-        // picker, we need to adjust its height accordingly.
-        function update_spectrum(popover, update_func) {
-            var initial_height = popover[0].offsetHeight;
-
-            var colorpicker = popover.find('.colorpicker-container').find('.colorpicker');
-            update_func(colorpicker);
-            var after_height = popover[0].offsetHeight;
-
-            var popover_root = popover.closest(".popover");
-            var current_top_px = parseFloat(popover_root.css('top').replace('px', ''));
-            var height_delta = - (after_height - initial_height) * 0.5;
-
-            popover_root.css('top', (current_top_px + height_delta) + "px");
-        }
-
-        $(elt).popover("show");
-        var data_id = stream_data.get_sub(stream).stream_id;
-        var popover = $('.streams_popover[data-id=' + data_id + ']');
-        update_spectrum(popover, function (colorpicker) {
-            colorpicker.spectrum(stream_color.sidebar_popover_colorpicker_options);
-        });
-
-        $('.streams_popover').on('click', '.custom_color', function (e) {
-            update_spectrum($(e.target).closest('.streams_popover'), function (colorpicker) {
-                colorpicker.spectrum("destroy");
-                colorpicker.spectrum(stream_color.sidebar_popover_colorpicker_options_full);
-                // In theory this should clean up the old color picker,
-                // but this seems a bit flaky -- the new colorpicker
-                // doesn't fire until you click a button, but the buttons
-                // have been hidden.  We work around this by just manually
-                // fixing it up here.
-                colorpicker.parent().find('.sp-container').removeClass('sp-buttons-disabled');
-                $(e.target).hide();
-            });
-
-            $('.streams_popover').on('click', 'a.sp-cancel', function (e) {
-                popovers.hide_stream_sidebar_popover();
-            });
-        });
-
-        current_stream_sidebar_elem = elt;
-        e.stopPropagation();
-    });
-
     $('body').on('click', '.respond_button', function (e) {
-        respond_to_message({trigger: 'popover respond'});
+        var textarea = $("#new_message_content");
+        var msgid = $(e.currentTarget).data("message-id");
+
+        compose_actions.respond_to_message({trigger: 'popover respond'});
+        channel.get({
+            url: '/json/messages/' + msgid,
+            idempotent: true,
+            success: function (data) {
+                if (textarea.val() === "") {
+                    textarea.val("```quote\n" + data.raw_content +"\n```\n");
+                } else {
+                    textarea.val(textarea.val() + "\n```quote\n" + data.raw_content +"\n```\n");
+                }
+                $("#new_message_content").trigger("autosize.resize");
+            },
+        });
         popovers.hide_actions_popover();
         e.stopPropagation();
         e.preventDefault();
     });
     $('body').on('click', '.respond_personal_button', function (e) {
-        respond_to_message({reply_type: 'personal', trigger: 'popover respond pm'});
+        compose_actions.respond_to_message({reply_type: 'personal', trigger: 'popover respond pm'});
         popovers.hide_all();
         e.stopPropagation();
         e.preventDefault();
     });
-    $('body').on('click', '.popover_narrow_by_id', function (e) {
-        var msgid = $(e.currentTarget).data('msgid');
-        popovers.hide_actions_popover();
-        narrow.by_id(msgid, {trigger: 'popover'});
-        e.stopPropagation();
-        e.preventDefault();
-    });
-    $('body').on('click', '.popover_narrow_by_conversation_and_time', function (e) {
-        var msgid = $(e.currentTarget).data('msgid');
-        popovers.hide_actions_popover();
-        narrow.by_conversation_and_time(msgid, {trigger: 'popover'});
-        e.stopPropagation();
-        e.preventDefault();
-    });
     $('body').on('click', '.popover_toggle_collapse', function (e) {
-        var home_row;
-        var msgid = $(e.currentTarget).data('msgid');
+        var msgid = $(e.currentTarget).data('message-id');
         var row = current_msg_list.get_row(msgid);
         var message = current_msg_list.get(rows.id(row));
 
-        // If we are narrowed we also need to collapse this message in the home
-        // view.
-        if (current_msg_list === narrowed_msg_list) {
-            home_row = home_msg_list.get_row(msgid);
-        }
+        popovers.hide_actions_popover();
 
-        var toggle_row = function toggle_row(row) {
-            if (!row) { return; }
-
+        if (row) {
             if (message.collapsed) {
                 condense.uncollapse(row);
             } else {
                 condense.collapse(row);
             }
-        };
-
-        popovers.hide_actions_popover();
-
-        toggle_row(row);
-        toggle_row(home_row);
+        }
 
         e.stopPropagation();
         e.preventDefault();
     });
     $('body').on('click', '.popover_edit_message', function (e) {
-        var msgid = $(e.currentTarget).data('msgid');
+        var msgid = $(e.currentTarget).data('message-id');
         var row = current_msg_list.get_row(msgid);
         popovers.hide_actions_popover();
         message_edit.start(row);
+        e.stopPropagation();
+        e.preventDefault();
+    });
+    $('body').on('click', '.view_edit_history', function (e) {
+        var msgid = $(e.currentTarget).data('msgid');
+        var row = current_msg_list.get_row(msgid);
+        var message = current_msg_list.get(rows.id(row));
+        var message_history_cancel_btn = $('#message-history-cancel');
+
+        popovers.hide_actions_popover();
+        message_edit.show_history(message);
+        message_history_cancel_btn.focus();
         e.stopPropagation();
         e.preventDefault();
     });
@@ -513,8 +523,7 @@ exports.register_click_handlers = function () {
         var stream = $(e.currentTarget).data('msg-stream');
         var topic = $(e.currentTarget).data('msg-topic');
         popovers.hide_actions_popover();
-        muting.mute_topic(stream, topic);
-        muting_ui.persist_and_rerender();
+        muting_ui.mute(stream, topic);
         e.stopPropagation();
         e.preventDefault();
     });
@@ -523,69 +532,114 @@ exports.register_click_handlers = function () {
         var stream = $(e.currentTarget).data('msg-stream');
         var topic = $(e.currentTarget).data('msg-topic');
         popovers.hide_actions_popover();
-        muting.unmute_topic(stream, topic);
+        muting_ui.unmute_topic(stream, topic);
         muting_ui.persist_and_rerender();
         e.stopPropagation();
         e.preventDefault();
     });
 
-    $('body').on('click', '.toggle_home', function (e) {
-        var stream = $(e.currentTarget).parents('ul').attr('data-name');
-        popovers.hide_stream_sidebar_popover();
-        subs.toggle_home(stream);
+    $('body').on('click', '.delete_message', function (e) {
+        var msgid = $(e.currentTarget).data('message-id');
+        popovers.hide_actions_popover();
+        message_edit.delete_message(msgid);
         e.stopPropagation();
+        e.preventDefault();
     });
 
-    $('body').on('click', '.narrow_to_stream', function (e) {
-        var stream = $(e.currentTarget).parents('ul').attr('data-name');
-        popovers.hide_stream_sidebar_popover();
-        narrow.by('stream', stream, {select_first_unread: true, trigger: 'sidebar popover'});
+    new Clipboard('.copy_link');
+
+    $('body').on('click', '.copy_link', function (e) {
+        popovers.hide_actions_popover();
+        var id = $(this).attr("data-message-id");
+        var row = $("[zid='" + id + "']");
+        row.find(".alert-copied").css("display", "block");
+        row.find(".alert-copied").delay(1000).fadeOut(300);
+
+        setTimeout(function () {
+            // The Cliboard library works by focusing to a hidden textarea.
+            // We unfocus this so keyboard shortcuts, etc., will work again.
+            $(":focus").blur();
+        }, 0);
+
         e.stopPropagation();
+        e.preventDefault();
     });
 
-    $('body').on('click', '.compose_to_stream', function (e) {
-        var stream = $(e.currentTarget).parents('ul').attr('data-name');
-        popovers.hide_stream_sidebar_popover();
-        compose.start('stream', {"stream": stream, trigger: 'sidebar stream actions'});
-        e.stopPropagation();
-    });
+    (function () {
+        var last_scroll = 0;
 
-    $('body').on('click', '.open_stream_settings', function (e) {
-        var stream = $(e.currentTarget).parents('ul').attr('data-name');
-        popovers.hide_stream_sidebar_popover();
-        if (! $('#subscriptions').hasClass('active')) {
-            // Go to streams page and once it loads, expand the relevant
-            // stream's settings.
-            $(document).one('subs_page_loaded.zulip', function (event) {
-                subs.show_settings_for(stream);
-            });
-            ui.change_tab_to('#subscriptions');
-        } else {
-            // Already on streams page, so just expand the relevant stream.
-            subs.show_settings_for(stream);
-        }
-    });
+        $('.app').on('scroll', function () {
+            var date = new Date().getTime();
+
+            // only run `popovers.hide_all()` if the last scroll was more
+            // than 250ms ago.
+            if (date - last_scroll > 250) {
+                popovers.hide_all();
+            }
+
+            // update the scroll time on every event to make sure it doesn't
+            // retrigger `hide_all` while still scrolling.
+            last_scroll = date;
+        });
+    }());
 
 };
 
 exports.any_active = function () {
     // True if any popover (that this module manages) is currently shown.
-    return popovers.actions_popped() || user_sidebar_popped() || stream_sidebar_popped() || topic_sidebar_popped() || message_info_popped();
+    return popovers.actions_popped() || user_sidebar_popped() ||
+        stream_popover.stream_popped() || stream_popover.topic_popped() ||
+        message_info_popped() || emoji_picker.reactions_popped();
 };
 
 exports.hide_all = function () {
+    $('.has_popover').removeClass('has_popover has_actions_popover has_emoji_popover');
     popovers.hide_actions_popover();
     popovers.hide_message_info_popover();
-    popovers.hide_stream_sidebar_popover();
-    popovers.hide_topic_sidebar_popover();
+    emoji_picker.hide_emoji_popover();
+    stream_popover.hide_stream_popover();
+    stream_popover.hide_topic_popover();
     popovers.hide_user_sidebar_popover();
     popovers.hide_userlist_sidebar();
-    popovers.hide_streamlist_sidebar();
+    stream_popover.restore_stream_list_size();
+
+    // look through all the popovers that have been added and removed.
+    list_of_popovers.forEach(function ($o) {
+        if (!document.body.contains($o.$element[0]) && $o.$tip) {
+            $o.$tip.remove();
+        }
+    });
 };
 
 exports.set_userlist_placement = function (placement) {
     userlist_placement = placement || "right";
 };
 
+exports.compute_placement = function (elt) {
+    var approx_popover_height = 400;
+    var approx_popover_width = 400;
+    var distance_from_bottom = message_viewport.height() - elt.offset().top;
+    var distance_from_right = message_viewport.width() - elt.offset().left;
+    var will_extend_beyond_bottom_of_viewport = distance_from_bottom < approx_popover_height;
+    var will_extend_beyond_top_of_viewport = elt.offset().top < approx_popover_height;
+    var will_extend_beyond_left_of_viewport = elt.offset().left < (approx_popover_width / 2);
+    var will_extend_beyond_right_of_viewport = distance_from_right < (approx_popover_width / 2);
+    var placement = 'bottom';
+    if (will_extend_beyond_bottom_of_viewport && !will_extend_beyond_top_of_viewport) {
+        placement = 'top';
+    }
+    if (will_extend_beyond_right_of_viewport && !will_extend_beyond_left_of_viewport) {
+        placement = 'left';
+    }
+    if (will_extend_beyond_left_of_viewport && !will_extend_beyond_right_of_viewport) {
+        placement = 'right';
+    }
+    return placement;
+};
+
 return exports;
 }());
+
+if (typeof module !== 'undefined') {
+    module.exports = popovers;
+}

@@ -1,16 +1,26 @@
-#!/bin/sh -xe
+#!/usr/bin/env bash
+set -e
+set -x
+
+"$(dirname "$0")/../scripts/setup/terminate-psql-sessions" zulip zulip zulip_base
+
+function migration_status {
+    ./manage.py get_migration_status --settings=zproject.settings > $1
+}
 
 psql -h localhost postgres zulip <<EOF
 DROP DATABASE IF EXISTS zulip;
 CREATE DATABASE zulip TEMPLATE zulip_base;
 EOF
 
-python manage.py migrate --noinput
-python manage.py createcachetable third_party_api_results
-python manage.py populate_db -n100 --threads=1
+sh "$(dirname "$0")/../scripts/setup/flush-memcached"
+
+./manage.py migrate --noinput
+migration_status "var/migration_status_dev"
+./manage.py createcachetable third_party_api_results
+./manage.py populate_db -n100 --threads=1
 # Ensure that the local user's API key is synced from ~/.zuliprc
 
 if [ -e ~/.zuliprc ]; then
-    python manage.py sync_api_key
+    ./manage.py sync_api_key
 fi
-

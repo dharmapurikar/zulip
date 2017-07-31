@@ -1,36 +1,56 @@
+# Quick format and style primer:
+#
+#  * If a pattern is meant only for a specific location, it should have a
+#    leading slash, like `/staticfiles.json`.
+#    * In principle any non-trailing slash (like `zproject/dev-secrets.conf`)
+#      will do, but this makes a confusing pattern.  Adding a leading slash
+#      is clearer.
+#
+#  * Patterns like `.vscode/` without slashes, or with only a trailing slash,
+#    match in any subdirectory.
+#
+#  * Subdirectories with several internal things to ignore get their own
+#    `.gitignore` files.
+#
+# See `git help ignore` for details on the format.
+
+## Config files for the dev environment
+/zproject/dev-secrets.conf
+/tools/conf.ini
+/tools/custom_provision
+
+## Byproducts of setting up and using the dev environment
 *.pyc
-*~
-/all_messages_log.*
-/event_log/*
-/server.log
-/update-prod-static.log
+
+/.vagrant
+/var
+
+# Static build
+*.mo
+npm-debug.log
+/node_modules
 /prod-static
-/errors/*
+/staticfiles.json
+/webpack-stats-production.json
+/yarn-error.log
+
+# Test / analysis tools
+.coverage
+
+## Files left by various editors and local environments
+# (Ideally these should be in everyone's respective personal gitignore files.)
+*~
 *.sw[po]
-*.DS_Store
-event_queues.pickle
-stats/
-zerver/fixtures/available-migrations
-zerver/fixtures/migration-status
-zerver/fixtures/test_data1.json
-zerver/tests/frontend/test_credentials.js
+.idea
 .kdev4
 zulip.kdev4
-memcached_prefix
-coverage/
-/queue_error
-/workers.log
-.test-js-with-node.html
-digest.log
-errors.log
-manage.log
 .kateproject.d/
 .kateproject
 *.kate-swp
-event_queues.json
-.vagrant
-/zproject/dev-secrets.conf
-static/third/gemoji/
-static/third/zxcvbn/
-tools/emoji_dump/bitmaps/
-tools/emoji_dump/*.ttx
+*.sublime-project
+*.sublime-workspace
+.vscode/
+*.DS_Store
+
+## Miscellaneous
+# (Ideally this section is empty.)

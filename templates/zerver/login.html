@@ -1,154 +1,145 @@
 {% extends "zerver/portico.html" %}
-
 {# Login page. #}
 
-{% load minified_js %}
-
 {% block customhead %}
-    {{ block.super }}
-    {% minified_js 'signup' %}
-{% endblock %}
-
-{% block os_announcement %}
-  {% if zulip_com %}
-  <div class="os-headline-container">
-    <img src="/static/images/logo/zballoon.png" class="os-illustration" alt="Zulip balloon" />
-    <div class="main-headline-text">
-      <span class="tagline os-tagline">
-         Zulip has been released as open source software!
-      </span>
-      <span class="footnote os-footnote">
-         Read the <a href="https://blogs.dropbox.com/tech/2015/09/open-sourcing-zulip-a-dropbox-hack-week-project" target="_blank">announcement</a> or go to <a href="https://www.zulip.org" target="_blank">the Zulip open source project website</a>.
-      </span>
-    </div>
-  </div>
-  {% endif %}
+    {{ super() }}
+    {{ render_bundle('signup') }}
 {% endblock %}
 
 {% block portico_content %}
 
+
+
 {% if password_auth_enabled %}
 <script type="text/javascript">
 {% if email %}
-{% if not desktop_sso_dispatch %}
-autofocus('#id_password');
-{% endif %}
+common.autofocus('#id_password');
 {% else %}
-autofocus('#id_username');
+common.autofocus('#id_username');
 {% endif %}
 </script>
 {% endif %}
 
 
-<div class="app login-page">
-  <div class="app-main login-page-container">
+<div class="app login-page split-view new-style flex full-page">
+    <div class="inline-block">
+        <div class="lead">
+            <h1 class="get-started">{{ _("Sign in to Zulip") }}</h1>
+        </div>
 
-    {% if dev_auth_enabled %}
-    <h3 class="login-page-header">Zulip Dev Login</h3>
-    {% if not password_auth_enabled %}
-    <h4 class="login-page-subheader">Choose a user:</h4>
-    {% endif %}
-    {% else %}
-    <h3 class="login-page-header">You look familiar.</h3>
-    {% endif %}
+        <div class="app-main login-page-container white-box inline-block">
+            {% if only_sso %}
+            {# SSO users don't have a password. #}
 
-{% if only_sso %}
-    {% comment %}SSO users don't have a password.{% endcomment %}
+            <div class="login-sso">
+                <a href="/accounts/login/sso" class="btn btn-large btn-primary">{{ _('Sign in with SSO') }}</a>
+            </div>
 
-    <div class="login-sso">
-      <a href="/accounts/login/sso" class="btn btn-large btn-primary">Sign in with SSO</a>
-    </div>
-
-{% else %}
-{% comment %}Non-SSO users.{% endcomment %}
-
-{% if form.errors or desktop_sso_unknown_email %}
-<div class="alert alert-error">
-    {% if desktop_sso_unknown_email %}
-        Zulip is not currently available for your domain. <br />
-    {% else %}
-        {% for error in form.errors.values %}
-        <div>{{ error | striptags }}</div>
-        {% endfor %}
-    {% endif %}
-</div>
-{% endif %}
-
-    {% if email %}
-    <div class="alert">
-        You've already registered with this email address. Please log in below.
-    </div>
-    {% endif %}
-
-        {% if password_auth_enabled or desktop_sso_dispatch %}
-        <form name="login_form" id="login_form" method="post" class="login-form"
-            {% if desktop_sso_dispatch %}
-            {# desktop_sso_dispatch is only set when this template is invoked by zilencer.views #}
-              action="{% url 'zilencer.views.account_deployment_dispatch' %}"
             {% else %}
-              action="{% url 'django.contrib.auth.views.login' %}?next={{ next }}"
-            {% endif %}
-        >
-            {% csrf_token %}
-            <div class="control-group">
-                <label for="id_username" class="control-label">Email</label>
-                <div class="controls">
-                    <input id="id_username" type="email" name="username" class="email required" value="{{ email }}" maxlength="72" />
-                </div>
-            </div>
+            {# Non-SSO users. #}
 
-            {% if not desktop_sso_dispatch %}
-            <div class="control-group">
-                <label for="id_password" class="control-label">Password</label>
-                <div class="controls">
-                    <input id="id_password" name="password" class="required" type="password" />
+            {% if realm_name %}
+            <div class="left-side">
+                <div class="org-header">
+                    <img class="avatar" src="{{ realm_icon }}" alt="" />
+                    <div class="info-box">
+                        <div class="organization-name">{{ realm_name }}</div>
+                        <div class="organization-path">{{ realm_uri }}</div>
+                    </div>
+                </div>
+                <div class="description">
+                    {{ realm_description|safe }}
                 </div>
             </div>
             {% endif %}
-            <div class="control-group">
-                <div class="controls">
-                    <input type="submit" class="btn btn-large btn-primary" value="Log in" />
-                    {% if not desktop_sso_dispatch %}
-                    <span class="login-forgot-password">
-                      <a href="{% url 'django.contrib.auth.views.password_reset' %}">Forgot password?</a>
-                    </span>
+
+            <div class="right-side">
+              {% if no_auth_enabled %}
+              <div class="alert">
+                  <p>No authentication backends are enabled on this
+                  server yet, so it is impossible to login!</p>
+
+                  <p>See
+                  the <a href="http://zulip.readthedocs.io/en/latest/prod-install.html#step-3-configure-zulip">Zulip
+                  authentication documentation</a> to learn how to
+                  configure authentication backends.</p>
+              </div>
+              {% else %}
+                {% if password_auth_enabled %}
+                <form name="login_form" id="login_form" method="post" class="login-form"
+                      action="{{ url('django.contrib.auth.views.login') }}?next={{ next }}">
+
+                    {{ csrf_input }}
+
+                    <!-- .no-validation is for removing the red star in CSS -->
+                    <div class="input-box no-validation">
+                        <input id="id_username" type="email" name="username" class="email required"
+                            {% if email %} value="{{ email }}" {% else %} value="" {% endif %}
+                            maxlength="72" required />
+                        <label for="id_username">{{ _('Email') }}</label>
+                    </div>
+
+                    <div class="input-box no-validation">
+                        <input id="id_password" name="password" class="required" type="password" required />
+                        <label for="id_password" class="control-label">{{ _('Password') }}</label>
+                    </div>
+
+                    {% if form.errors %}
+                    <div class="alert alert-error">
+                        {% for error in form.errors.values() %}
+                        <div>{{ error | striptags }}</div>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+
+                    {% if email %}
+                    <div class="alert">
+                        {{ _("You've already registered with this email address. Please sign in below.") }}
+                    </div>
+                    {% endif %}
+
+                    {% if subdomain %}
+                    <div class="alert">
+                        {{ wrong_subdomain_error }}
+                    </div>
+                    {% endif %}
+
+                    <button type="submit" name="button" class="full-width">{{ _("Sign in") }}</button>
+                </form>
+
+                {% if any_oauth_backend_enabled %}
+                <div class="or">or</div>
+                {% endif %}
+
+                {% endif %} <!-- if password_auth_enabled -->
+
+                {% if google_auth_enabled %}
+                <div class="login-google">
+                    <form class="form-inline" action="{{ url('zerver.views.auth.start_google_oauth2') }}" method="get">
+                        <button class="login-google-button full-width">{{ _('Sign in with Google') }}</button>
+                    </form>
+                </div>
+                {% endif %}
+
+                {% if github_auth_enabled %}
+                 <div class="login-github">
+                    <form class="form-inline github-wrapper" action="{{ url('login-social', args=('github',)) }}" method="get">
+                        <button class="login-github-button github">{{ _('Sign in with GitHub') }}</button>
+                    </form>
+                </div>
+                {% endif %}
+
+                <div class="actions">
+                    <a class="forgot-password" href="/accounts/password/reset/">Forgot your password?</a>
+                    {% if not register_link_disabled %}
+                    <a class="register-link float-right" href="/register/">Register</a>
                     {% endif %}
                 </div>
+                {% endif %}
             </div>
-        </form>
-	{% endif %}
-	{% if dev_auth_enabled %}
-	<form name="direct_login_form" id="direct_login_form" method="post" class="login-form"
-	      action="{% url 'zerver.views.dev_direct_login' %}">
-            {% csrf_token %}
-	    <div class="control-group">
-	        {% if password_auth_enabled %}
-	        <label for="direct_email" class="direct-label">or Choose a user:</label>
-		{% endif %}
-	        <div class="controls">
-                    <p>(Administrators)</p>
-		    {% for user_email in direct_admins %}
-		    <p><input type="submit" name="direct_email" class="btn-direct btn-admin" value="{{ user_email }}" /></p>
-		    {% endfor %}
-                    <p>(Normal users)</p>
-		    {% for user_email in direct_users %}
-		    <p><input type="submit" name="direct_email" class="btn-direct btn-user" value="{{ user_email }}" /></p>
-		    {% endfor %}
-	        </div>
-	    </div>
-	</form>
-	{% endif %}
-
-    {% if google_auth_enabled %}
-    <div class="login-google">
-    or <a href="{% url 'zerver.views.start_google_oauth2' %}" class="login-google-button zocial google">Sign in with Google</a>
+            {% endif %}
+        </div>
     </div>
-    {% endif %}
-
-{% endif %}
-
-</div>
-<div class="footer-padder"></div>
 </div>
 <script type="text/javascript">
 if (window.location.hash.substring(0, 1) === "#") {

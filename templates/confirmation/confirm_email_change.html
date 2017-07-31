@@ -1,0 +1,13 @@
+{% extends "zerver/portico.html" %}
+
+{% block portico_content %}
+
+<div class="pitch">
+    <hr/>
+    <p>
+        This confirms that the email address for your Zulip account has changed
+        from {{old_email}} to {{ new_email }}.
+    </p>
+</div>
+
+{% endblock %}

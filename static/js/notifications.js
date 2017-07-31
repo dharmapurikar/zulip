@@ -9,7 +9,6 @@ var notice_memory = {};
 var window_has_focus = document.hasFocus && document.hasFocus();
 
 var asked_permission_already = false;
-var names;
 var supports_sound;
 
 var unread_pms_favicon = '/static/images/favicon/favicon-pms.png';
@@ -26,32 +25,33 @@ if (window.webkitNotifications) {
         checkPermission: function checkPermission() {
             if (window.Notification.permission === 'granted') {
                 return 0;
-            } else {
-                return 2;
             }
+            return 2;
         },
         requestPermission: window.Notification.requestPermission,
-        createNotification: function createNotification(icon, title, content) {
-            var notification_object = new window.Notification(title, {icon: icon, body: content});
+        createNotification: function createNotification(icon, title, content, tag) {
+            var notification_object = new window.Notification(title, {icon: icon,
+                                                                      body: content,
+                                                                      tag: tag});
             notification_object.show = function () {};
             notification_object.cancel = function () { notification_object.close(); };
             return notification_object;
-        }
+        },
     };
 }
 
 
-function browser_desktop_notifications_on () {
+function browser_desktop_notifications_on() {
     return (notifications_api &&
             // Firefox on Ubuntu claims to do webkitNotifications but its notifications are terrible
-            $.browser.webkit &&
+            /webkit/i.test(navigator.userAgent) &&
             // 0 is PERMISSION_ALLOWED
             notifications_api.checkPermission() === 0) ||
         // window.bridge is the desktop client
         (window.bridge !== undefined);
 }
 
-function cancel_notification_object (notification_object) {
+function cancel_notification_object(notification_object) {
         // We must remove the .onclose so that it does not trigger on .cancel
         notification_object.onclose = function () {};
         notification_object.onclick = function () {};
@@ -69,17 +69,11 @@ exports.initialize = function () {
 
         // Update many places on the DOM to reflect unread
         // counts.
-        unread.process_visible();
+        unread_ops.process_visible();
 
     }).blur(function () {
         window_has_focus = false;
     });
-
-    if ($.browser.mozilla === true && typeof Notification !== "undefined") {
-        Notification.requestPermission(function () {
-            asked_permission_already = true;
-        });
-    }
 
     if (window.bridge !== undefined) {
         supports_sound = true;
@@ -106,12 +100,21 @@ exports.initialize = function () {
 
     if (notifications_api) {
         $(document).click(function () {
-            if (!page_params.desktop_notifications_enabled || asked_permission_already) {
+            if (!page_params.enable_desktop_notifications || asked_permission_already) {
                 return;
             }
             if (notifications_api.checkPermission() !== 0) { // 0 is PERMISSION_ALLOWED
-                notifications_api.requestPermission(function () {});
-                asked_permission_already = true;
+                if (tutorial.is_running()) {
+                    tutorial.defer(function () {
+                        notifications_api.requestPermission(function () {
+                            asked_permission_already = true;
+                        });
+                    });
+                } else {
+                    notifications_api.requestPermission(function () {
+                        asked_permission_already = true;
+                    });
+                }
             }
         });
     }
@@ -120,7 +123,7 @@ exports.initialize = function () {
 // For web pages, the initial favicon is the same as the favicon we
 // set for no unread messages and the initial page title is the same
 // as the page title we set for no unread messages.  However, for the
-// OS X app, the dock icon does not get its badge updated on initial
+// macOS app, the dock icon does not get its badge updated on initial
 // page load.  If the badge icon was wrong right before a reload and
 // we actually have no unread messages then we will never execute
 // bridge.updateCount() until the unread count changes.  Therefore,
@@ -131,7 +134,7 @@ if (window.bridge !== undefined) {
     window.bridge.updateCount(0);
 }
 
-var new_message_count;
+var new_message_count = 0;
 
 exports.update_title_count = function (count) {
     new_message_count = count;
@@ -143,7 +146,9 @@ exports.redraw_title = function () {
     var n;
 
     var new_title = (new_message_count ? ("(" + new_message_count + ") ") : "")
-        + page_params.realm_name + " - " + page_params.product_name;
+        + narrow.narrow_title + " - "
+        + page_params.realm_name + " - "
+        + "Zulip";
 
     if (document.title === new_title) {
         return;
@@ -152,7 +157,7 @@ exports.redraw_title = function () {
     document.title = new_title;
 
     // IE doesn't support PNG favicons, *shrug*
-    if (! $.browser.msie) {
+    if (!/msie/i.test(navigator.userAgent)) {
         // Indicate the message count in the favicon
         if (new_message_count) {
             // Make sure we're working with a number, as a defensive programming
@@ -214,14 +219,28 @@ exports.window_has_focus = function () {
     return window_has_focus;
 };
 
-function in_browser_notify(message, title, content) {
-    var notification_html = $(templates.render('notification', {gravatar_url: ui.small_avatar_url(message),
-                                                                title: title,
-                                                                content: content}));
-    $('.top-right').notify({
-        message: {html: notification_html},
-        fadeOut: {enabled: true, delay: 4000}
+function in_browser_notify(message, title, content, raw_operators, opts) {
+    var notification_html = $(templates.render('notification', {
+        gravatar_url: people.small_avatar_url(message),
+        title: title,
+        content: content,
+        message_id: message.id,
+    }));
+
+    $(".top-right").notify({
+        message: {
+            html: notification_html,
+        },
+        fadeOut: {
+            enabled: true,
+            delay: 4000,
+        },
     }).show();
+
+    $(".notification[data-message-id='" + message.id + "']").expectOne().data("narrow", {
+        raw_operators: raw_operators,
+        opts_notif: opts,
+    });
 }
 
 exports.notify_above_composebox = function (note, link_class, link_msg_id, link_text) {
@@ -235,12 +254,17 @@ exports.notify_above_composebox = function (note, link_class, link_msg_id, link_
 };
 
 function process_notification(notification) {
-    var i, notification_object, key, content, other_recipients;
+    var i;
+    var notification_object;
+    var key;
+    var content;
+    var other_recipients;
     var message = notification.message;
     var title = message.sender_full_name;
     var msg_count = 1;
     var notification_source;
-
+    var raw_operators = [];
+    var opts = {select_first_unread: true, trigger: "notification click"};
     // Convert the content to plain text, replacing emoji with their alt text
     content = $('<div/>').html(message.content);
     ui.replace_emoji_with_text(content);
@@ -251,6 +275,10 @@ function process_notification(notification) {
     }
 
     if (message.type === "private") {
+        if (page_params.pm_content_in_desktop_notifications !== undefined
+            && !page_params.pm_content_in_desktop_notifications) {
+            content = "New private message from " + message.sender_full_name;
+        }
         key = message.display_reply_to;
         other_recipients = message.display_reply_to;
         // Remove the sender from the list of other recipients
@@ -271,7 +299,7 @@ function process_notification(notification) {
 
     if (content.length > 150) {
         // Truncate content at a word boundary
-        for (i = 150; i > 0; i--) {
+        for (i = 150; i > 0; i -= 1) {
             if (content[i] === ' ') {
                 break;
             }
@@ -287,27 +315,37 @@ function process_notification(notification) {
         cancel_notification_object(notification_object);
     }
 
-    if (message.type === "private" && message.display_recipient.length > 2) {
-        // If the message has too many recipients to list them all...
-        if (content.length + title.length + other_recipients.length > 230) {
-            // Then count how many people are in the conversation and summarize
-            // by saying the conversation is with "you and [number] other people"
-            other_recipients = other_recipients.replace(/[^,]/g, "").length +
-                               " other people";
+    if (message.type === "private") {
+        if (message.display_recipient.length > 2) {
+            // If the message has too many recipients to list them all...
+            if (content.length + title.length + other_recipients.length > 230) {
+                // Then count how many people are in the conversation and summarize
+                // by saying the conversation is with "you and [number] other people"
+                other_recipients = other_recipients.replace(/[^,]/g, "").length +
+                                   " other people";
+            }
+
+            title += " (to you and " + other_recipients + ")";
+        } else {
+            title += " (to you)";
         }
-        title += " (to you and " + other_recipients + ")";
+
+        raw_operators = [{operand: message.reply_to, operator: "pm-with"}];
     }
+
     if (message.type === "stream") {
         title += " (to " + message.stream + " > " + message.subject + ")";
+        raw_operators = [{operator: "stream", operand: message.stream},
+                         {operator: "topic", operand: message.subject}];
     }
 
     if (window.bridge === undefined && notification.webkit_notify === true) {
-        var icon_url = ui.small_avatar_url(message);
+        var icon_url = people.small_avatar_url(message);
         notice_memory[key] = {
             obj: notifications_api.createNotification(
-                    icon_url, title, content),
+                    icon_url, title, content, message.id),
             msg_count: msg_count,
-            message_id: message.id
+            message_id: message.id,
         };
         notification_object = notice_memory[key].obj;
         notification_object.onclick = function () {
@@ -321,19 +359,28 @@ function process_notification(notification) {
             delete notice_memory[key];
         };
         notification_object.show();
-    } else if (notification.webkit_notify === false && typeof Notification !== "undefined" && $.browser.mozilla === true) {
+    } else if (notification.webkit_notify === false && typeof Notification !== "undefined" && /mozilla/i.test(navigator.userAgent) === true) {
         Notification.requestPermission(function (perm) {
             if (perm === 'granted') {
-                Notification(title, {
+                notification_object = new Notification(title, {
                     body: content,
-                    iconUrl: ui.small_avatar_url(message)
+                    iconUrl: people.small_avatar_url(message),
+                    tag: message.id,
                 });
+                notification_object.onclick = function () {
+                    // We don't need to bring the browser window into focus explicitly
+                    // by calling `window.focus()` as well as don't need to clear the
+                    // notification since it is the default behavior in Firefox.
+                    if (feature_flags.clicking_notification_causes_narrow) {
+                        narrow.by_subject(message.id, {trigger: 'notification'});
+                    }
+                };
             } else {
-                in_browser_notify(message, title, content);
+                in_browser_notify(message, title, content, raw_operators, opts);
             }
         });
     } else if (notification.webkit_notify === false) {
-        in_browser_notify(message, title, content);
+        in_browser_notify(message, title, content, raw_operators, opts);
     } else {
         // Shunt the message along to the desktop client
         window.bridge.desktopNotification(title, content, notification_source);
@@ -354,7 +401,7 @@ exports.speaking_at_me = function (message) {
         return false;
     }
 
-    return message.mentioned;
+    return message.mentioned_me_directly;
 };
 
 function message_is_notifiable(message) {
@@ -372,12 +419,13 @@ function message_is_notifiable(message) {
         return false;
     }
 
-    // @-mentions take precent over muted-ness. See Trac #1929
+    // @-<username> mentions take precedence over muted-ness. @all mentions
+    // are suppressed.
     if (exports.speaking_at_me(message)) {
         return true;
     }
     if ((message.type === "stream") &&
-        !stream_data.in_home_view(message.stream)) {
+        !stream_data.in_home_view(message.stream_id)) {
         return false;
     }
     if ((message.type === "stream") &&
@@ -394,26 +442,26 @@ function should_send_desktop_notification(message) {
     // For streams, send if desktop notifications are enabled for this
     // stream.
     if ((message.type === "stream") &&
-        subs.receives_desktop_notifications(message.stream)) {
+        stream_data.receives_desktop_notifications(message.stream)) {
         return true;
     }
 
     // For PMs and @-mentions, send if desktop notifications are
     // enabled.
     if ((message.type === "private") &&
-        page_params.desktop_notifications_enabled) {
+        page_params.enable_desktop_notifications) {
         return true;
     }
 
     // For alert words and @-mentions, send if desktop notifications
     // are enabled.
     if (alert_words.notifies(message) &&
-        page_params.desktop_notifications_enabled) {
+        page_params.enable_desktop_notifications) {
         return true;
     }
 
     if (exports.speaking_at_me(message) &&
-        page_params.desktop_notifications_enabled) {
+        page_params.enable_desktop_notifications) {
         return true;
     }
 
@@ -423,21 +471,21 @@ function should_send_desktop_notification(message) {
 function should_send_audible_notification(message) {
     // For streams, ding if sounds are enabled for this stream.
     if ((message.type === "stream") &&
-        subs.receives_audible_notifications(message.stream)) {
+        stream_data.receives_audible_notifications(message.stream)) {
         return true;
     }
 
     // For PMs and @-mentions, ding if sounds are enabled.
-    if ((message.type === "private") && page_params.sounds_enabled) {
+    if ((message.type === "private") && page_params.enable_sounds) {
         return true;
     }
 
     // For alert words and @-mentions, ding if sounds are enabled.
-    if (alert_words.notifies(message) && page_params.sounds_enabled) {
+    if (alert_words.notifies(message) && page_params.enable_sounds) {
         return true;
     }
 
-    if (exports.speaking_at_me(message) && page_params.sounds_enabled) {
+    if (exports.speaking_at_me(message) && page_params.enable_sounds) {
         return true;
     }
 
@@ -482,44 +530,65 @@ function get_message_header(message) {
     if (message.display_recipient.length > 2) {
         return "group PM with " + message.display_reply_to;
     }
-    if (message.reply_to === page_params.email) {
+    if (people.is_current_user(message.reply_to)) {
         return "PM with yourself";
     }
     return "PM with " + message.display_reply_to;
 }
 
-exports.possibly_notify_new_messages_outside_viewport = function (messages) {
+exports.get_local_notify_mix_reason = function (message) {
+    var row = current_msg_list.get_row(message.id);
+    if (row.length > 0) {
+        // If our message is in the current message list, we do
+        // not have a mix, so we are happy.
+        return;
+    }
+
+    if (message.type === "stream" && muting.is_topic_muted(message.stream, message.subject)) {
+        return "Sent! Your message was sent to a topic you have muted.";
+    }
+
+    if (message.type === "stream" && !stream_data.in_home_view(message.stream_id)) {
+        return "Sent! Your message was sent to a stream you have muted.";
+    }
+
+    // offscreen because it is outside narrow
+    // we can only look for these on non-search (can_apply_locally) messages
+    // see also: exports.notify_messages_outside_current_search
+    return "Sent! Your message is outside your current narrow.";
+};
+
+exports.notify_local_mixes = function (messages) {
+    /*
+        This code should only be called when we are locally echoing
+        messages.  It notifies users that their messages aren't
+        actually in the view that they composed to.
+
+        This code is called after we insert messages into our
+        message list widgets.  All of the conditions here are
+        checkable locally, so we may want to execute this code
+        earlier in the codepath at some point and possibly punt
+        on local rendering.
+    */
+
     _.each(messages, function (message) {
-        if (message.sender_email !== page_params.email) {
+        if (!people.is_my_user_id(message.sender_id)) {
+            blueslip.warn('We did not expect messages sent by others to get here');
             return;
         }
-        // queue up offscreen because of narrowed, or (secondarily) offscreen
-        // because it doesn't fit in the currently visible viewport
 
-        var note;
-        var link_class;
+        var reason = exports.get_local_notify_mix_reason(message);
+
+        if (!reason) {
+            // This is more than normal, just continue on.
+            return;
+        }
+
         var link_msg_id = message.id;
-        var link_text;
+        var link_class = "compose_notification_narrow_by_subject";
+        var link_text = "Narrow to " + get_message_header(message);
 
-        var row = current_msg_list.get_row(message.id);
-        if (row.length === 0) {
-            if (message.type === "stream" && muting.is_topic_muted(message.stream, message.subject)) {
-                note = "Sent! Your message was sent to a topic you have muted.";
-            } else if (message.type === "stream" && !stream_data.in_home_view(message.stream)) {
-                note = "Sent! Your message was sent to a stream you have muted.";
-            } else {
-                // offscreen because it is outside narrow
-                // we can only look for these on non-search (can_apply_locally) messages
-                // see also: exports.notify_messages_outside_current_search
-                note = "Sent! Your message is outside your current narrow.";
-            }
-            link_class = "compose_notification_narrow_by_subject";
-            link_text = "Narrow to " + get_message_header(message);
-        } else {
-            // return with _.each is like continue for normal for loops.
-            return;
-        }
-        exports.notify_above_composebox(note, link_class, link_msg_id, link_text);
+        exports.notify_above_composebox(reason, link_class, link_msg_id, link_text);
     });
 };
 
@@ -527,7 +596,7 @@ exports.possibly_notify_new_messages_outside_viewport = function (messages) {
 // the current_msg_list (!can_apply_locally; a.k.a. "a search").
 exports.notify_messages_outside_current_search = function (messages) {
     _.each(messages, function (message) {
-        if (message.sender_email !== page_params.email) {
+        if (!people.is_current_user(message.sender_email)) {
             return;
         }
         exports.notify_above_composebox("Sent! Your recent message is outside the current search.",
@@ -551,7 +620,8 @@ $(function () {
     }
 
     $(document).on('message_id_changed', function (event) {
-        var old_id = event.old_id, new_id = event.new_id;
+        var old_id = event.old_id;
+        var new_id = event.new_id;
 
         // If a message ID that we're currently storing (as a link) has changed,
         // update that link as well
@@ -576,7 +646,7 @@ exports.register_click_handlers = function () {
     $('#out-of-view-notification').on('click', '.compose_notification_scroll_to_message', function (e) {
         var msgid = $(e.currentTarget).data('msgid');
         current_msg_list.select_id(msgid);
-        scroll_to_selected();
+        navigate.scroll_to_selected();
         e.stopPropagation();
         e.preventDefault();
     });
@@ -592,22 +662,30 @@ exports.handle_global_notification_updates = function (notification_name, settin
     // for a given message. These settings do not affect whether or not a
     // particular stream should receive notifications.
     if (notification_name === "enable_stream_desktop_notifications") {
-        page_params.stream_desktop_notifications_enabled = setting;
+        page_params.enable_stream_desktop_notifications = setting;
     } else if (notification_name === "enable_stream_sounds") {
-        page_params.stream_sounds_enabled = setting;
+        page_params.enable_stream_sounds = setting;
     } else if (notification_name === "enable_desktop_notifications") {
-        page_params.desktop_notifications_enabled = setting;
+        page_params.enable_desktop_notifications = setting;
     } else if (notification_name === "enable_sounds") {
-        page_params.sounds_enabled = setting;
+        page_params.enable_sounds = setting;
     } else if (notification_name === "enable_offline_email_notifications") {
         page_params.enable_offline_email_notifications = setting;
     } else if (notification_name === "enable_offline_push_notifications") {
-        page_params.enable_offline_push_notifications= setting;
+        page_params.enable_offline_push_notifications = setting;
+    } else if (notification_name === "enable_online_push_notifications") {
+        page_params.enable_online_push_notifications = setting;
     } else if (notification_name === "enable_digest_emails") {
         page_params.enable_digest_emails = setting;
+    } else if (notification_name === "pm_content_in_desktop_notifications") {
+        page_params.pm_content_in_desktop_notifications = setting;
     }
 };
 
 return exports;
 
 }());
+
+if (typeof module !== 'undefined') {
+    module.exports = notifications;
+}
